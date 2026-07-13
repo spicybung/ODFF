@@ -1,6 +1,10 @@
 #include "Application.h"
 #include "FileDialog.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include <GLFW/glfw3.h>
 #include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
@@ -313,6 +317,22 @@ void Application::DrawToolbar()
     ImGui::Checkbox("Collision", &showCollision);
     ImGui::SameLine();
     ImGui::Checkbox("Grid", &showGrid);
+
+    ImGui::SameLine();
+
+    if (ImGui::Button("About"))
+    {
+#ifdef _WIN32
+        MessageBoxA(
+            nullptr,
+            "A program for embedding SAMP collision in DFFs\n\n"
+            "https://github.com/spicybung\n\n"
+            "Reigns Studios\n\n"
+            "v 0.1.9 2026",
+            "About ODFF",
+            MB_OK | MB_ICONINFORMATION);
+#endif
+    }
 }
 
 void Application::DrawModelList()
