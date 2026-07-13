@@ -1,0 +1,60 @@
+# CMake build directories
+build/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+Makefile
+
+# Visual Studio
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.user
+*.suo
+
+# Compiler and linker output
+*.obj
+*.o
+*.lib
+*.exp
+*.ilk
+*.idb
+*.pdb
+*.pch
+*.tlog
+*.lastbuildstate
+
+# Executables and DLLs
+*.exe
+*.dll
+
+# Configuration directories
+Debug/
+Release/
+RelWithDebInfo/
+MinSizeRel/
+x64/
+x86/
+Standalone/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.bak
+*.swp
+*~
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# IDEs
+.vscode/
+.idea/
