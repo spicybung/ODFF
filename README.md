@@ -1,6 +1,6 @@
 # ODFF
 
-**ODFF** is an open source model conversion program for SAMP. That is, it will attach the proper SAMP collision to an object or object group of your choice, allowing it to display and be used correctly in SA-MP/open.mp.
+**ODFF** is an open source model conversion program for SAMP/OMP. That is, it will attach the proper SAMP collision to an object or object group of your choice, allowing it to display and be used correctly in SA-MP/open.mp.
 
 
 ### How It Works
