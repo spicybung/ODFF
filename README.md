@@ -4,6 +4,9 @@
 
 <img width="1917" height="1117" alt="image" src="https://github.com/user-attachments/assets/96110ba7-8736-45a5-8dc4-0740567ab716" />
 
+<img width="1918" height="1115" alt="image" src="https://github.com/user-attachments/assets/3371e91f-2ccd-41f7-a132-ac369bde01e9" />
+
+
 
 ### How It Works
 
