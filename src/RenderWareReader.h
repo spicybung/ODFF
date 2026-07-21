@@ -57,6 +57,9 @@ private:
     bool ParseMaterial(BinaryReader& reader, const ChunkHeader& materialChunk, MaterialInfo& material);
     bool ParseAtomic(BinaryReader& reader, const ChunkHeader& atomicChunk, ModelData& model);
     void ParseFrameExtension(BinaryReader& reader, const ChunkHeader& extension, Frame& frame);
+    void ParseClumpExtension(BinaryReader& reader, const ChunkHeader& extension, ModelData& model);
+    void ParseGeometryExtension(BinaryReader& reader, const ChunkHeader& extension, Geometry& geometry);
+    void Parse2DFX(BinaryReader& reader, const ChunkHeader& plugin, Geometry& geometry);
     void BuildWorldTransforms(ModelData& model);
     void BuildBounds(ModelData& model);
 };

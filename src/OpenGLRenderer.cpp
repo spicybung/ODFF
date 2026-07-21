@@ -7,8 +7,10 @@
 #include <GL/gl.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <unordered_set>
 
 namespace
@@ -58,6 +60,51 @@ namespace
             std::isfinite(value.x) &&
             std::isfinite(value.y) &&
             std::isfinite(value.z);
+    }
+
+    std::string NormalizeTextureName(std::string name)
+    {
+        const std::size_t slash = name.find_last_of("/\\");
+        if (slash != std::string::npos)
+        {
+            name.erase(0, slash + 1);
+        }
+
+        const std::size_t dot = name.find_last_of('.');
+        if (dot != std::string::npos)
+        {
+            name.erase(dot);
+        }
+
+        std::transform(
+            name.begin(),
+            name.end(),
+            name.begin(),
+            [](unsigned char character)
+            {
+                return static_cast<char>(std::tolower(character));
+            });
+
+        return name;
+    }
+
+    GLint TextureWrapMode(std::uint32_t addressing)
+    {
+        constexpr GLint GlClampToEdge = 0x812F;
+        constexpr GLint GlMirroredRepeat = 0x8370;
+
+        switch (addressing)
+        {
+            case 2:
+                return GlMirroredRepeat;
+
+            case 3:
+            case 4:
+                return GlClampToEdge;
+
+            default:
+                return GL_REPEAT;
+        }
     }
 
     bool IsUsableTriangle(
@@ -137,7 +184,9 @@ void OpenGLRenderer::Render(
     int viewportHeight,
     bool wireframe,
     bool showCollision,
-    bool showGrid) const
+    bool showEffects2D,
+    bool showGrid,
+    const TxdData* textureDictionary) const
 {
     (void)showCollision;
 
@@ -220,7 +269,12 @@ void OpenGLRenderer::Render(
 
     if (document != nullptr)
     {
-        DrawModel(document->model, wireframe);
+        DrawModel(document->model, wireframe, textureDictionary);
+
+        if (showEffects2D)
+        {
+            DrawEffects2D(document->model);
+        }
 
     }
 
@@ -231,9 +285,256 @@ void OpenGLRenderer::Render(
     glDisable(GL_DEPTH_TEST);
 }
 
+void OpenGLRenderer::DrawEffects2D(const ModelData& model) const
+{
+    std::vector<WorldLight> lights;
+    lights.reserve(model.omniLightCount);
+
+    if (!model.atomics.empty())
+    {
+        for (const Atomic& atomic : model.atomics)
+        {
+            if (atomic.geometryIndex < 0 ||
+                static_cast<std::size_t>(atomic.geometryIndex) >= model.geometries.size())
+            {
+                continue;
+            }
+
+            Mat4 transform{};
+            if (atomic.frameIndex >= 0 &&
+                static_cast<std::size_t>(atomic.frameIndex) < model.frames.size())
+            {
+                transform = model.frames[static_cast<std::size_t>(atomic.frameIndex)].worldTransform;
+            }
+
+            CollectGeometryLights(
+                model.geometries[static_cast<std::size_t>(atomic.geometryIndex)],
+                transform,
+                lights);
+        }
+    }
+    else
+    {
+        for (const Geometry& geometry : model.geometries)
+        {
+            CollectGeometryLights(geometry, Mat4{}, lights);
+        }
+    }
+
+    if (lights.empty())
+    {
+        return;
+    }
+
+    DrawPointLightPass(model, lights);
+}
+
+void OpenGLRenderer::CollectGeometryLights(
+    const Geometry& geometry,
+    const Mat4& transform,
+    std::vector<WorldLight>& lights) const
+{
+    for (const Effect2D& effect : geometry.effects2d)
+    {
+        if (effect.type != 0)
+        {
+            continue;
+        }
+
+        lights.push_back({TransformPoint(transform, effect.position), effect});
+    }
+}
+
+void OpenGLRenderer::DrawPointLightPass(
+    const ModelData& model,
+    const std::vector<WorldLight>& lights) const
+{
+    if (!model.atomics.empty())
+    {
+        for (const Atomic& atomic : model.atomics)
+        {
+            if (atomic.geometryIndex < 0 ||
+                static_cast<std::size_t>(atomic.geometryIndex) >= model.geometries.size())
+            {
+                continue;
+            }
+
+            Mat4 transform{};
+            if (atomic.frameIndex >= 0 &&
+                static_cast<std::size_t>(atomic.frameIndex) < model.frames.size())
+            {
+                transform = model.frames[static_cast<std::size_t>(atomic.frameIndex)].worldTransform;
+            }
+
+            DrawGeometryPointLightPass(
+                model.geometries[static_cast<std::size_t>(atomic.geometryIndex)],
+                transform,
+                lights);
+        }
+        return;
+    }
+
+    for (const Geometry& geometry : model.geometries)
+    {
+        DrawGeometryPointLightPass(geometry, Mat4{}, lights);
+    }
+}
+
+void OpenGLRenderer::DrawGeometryPointLightPass(
+    const Geometry& geometry,
+    const Mat4& transform,
+    const std::vector<WorldLight>& lights) const
+{
+    glDisable(GL_TEXTURE_2D);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE);
+    glDepthMask(GL_FALSE);
+    glDepthFunc(GL_EQUAL);
+
+    glPushMatrix();
+    glMultMatrixf(transform.m);
+    glBegin(GL_TRIANGLES);
+
+    for (const Triangle& triangle : geometry.triangles)
+    {
+        const std::uint32_t indices[3] = {triangle.a, triangle.b, triangle.c};
+        if (indices[0] >= geometry.vertices.size() ||
+            indices[1] >= geometry.vertices.size() ||
+            indices[2] >= geometry.vertices.size())
+        {
+            continue;
+        }
+
+        for (const std::uint32_t index : indices)
+        {
+            const Vec3 worldPosition = TransformPoint(transform, geometry.vertices[index]);
+            float red = 0.0f;
+            float green = 0.0f;
+            float blue = 0.0f;
+
+            for (const WorldLight& light : lights)
+            {
+                const float range = light.effect.pointLightRange;
+                if (range <= 0.0f)
+                {
+                    continue;
+                }
+
+                const float distance = Length(light.position - worldPosition);
+                if (distance >= range)
+                {
+                    continue;
+                }
+
+                const float strength = 1.0f - distance / range;
+                const float falloff = strength * strength;
+                red += falloff * static_cast<float>(light.effect.color.r) / 255.0f;
+                green += falloff * static_cast<float>(light.effect.color.g) / 255.0f;
+                blue += falloff * static_cast<float>(light.effect.color.b) / 255.0f;
+            }
+
+            glColor3f(
+                std::min(red, 1.0f),
+                std::min(green, 1.0f),
+                std::min(blue, 1.0f));
+            const Vec3& vertex = geometry.vertices[index];
+            glVertex3f(vertex.x, vertex.y, vertex.z);
+        }
+    }
+
+    glEnd();
+    glPopMatrix();
+    glDepthFunc(GL_LEQUAL);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+}
+
+void OpenGLRenderer::DrawLightGlows(
+    const std::vector<WorldLight>& lights) const
+{
+    float modelView[16]{};
+    glGetFloatv(GL_MODELVIEW_MATRIX, modelView);
+
+    const Vec3 right{modelView[0], modelView[4], modelView[8]};
+    const Vec3 up{modelView[1], modelView[5], modelView[9]};
+
+    glDisable(GL_TEXTURE_2D);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    glDepthMask(GL_FALSE);
+
+    constexpr int SegmentCount = 32;
+    constexpr float TwoPi = 6.28318530718f;
+
+    for (const WorldLight& light : lights)
+    {
+        if (light.effect.coronaSize <= 0.0f || (light.effect.flags1 & 8) != 0)
+        {
+            continue;
+        }
+
+        const float size = light.effect.coronaSize;
+        const float red = static_cast<float>(light.effect.color.r) / 255.0f;
+        const float green = static_cast<float>(light.effect.color.g) / 255.0f;
+        const float blue = static_cast<float>(light.effect.color.b) / 255.0f;
+        const float alpha = static_cast<float>(light.effect.color.a) / 255.0f;
+
+        if ((light.effect.flags1 & 1) != 0)
+        {
+            glEnable(GL_DEPTH_TEST);
+        }
+        else
+        {
+            glDisable(GL_DEPTH_TEST);
+        }
+
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+        glBegin(GL_TRIANGLE_FAN);
+        glColor4f(red, green, blue, alpha);
+        glVertex3f(light.position.x, light.position.y, light.position.z);
+
+        glColor4f(red, green, blue, 0.0f);
+        for (int segment = 0; segment <= SegmentCount; ++segment)
+        {
+            const float angle = TwoPi * static_cast<float>(segment) /
+                static_cast<float>(SegmentCount);
+            const Vec3 offset =
+                right * (std::cos(angle) * size) +
+                up * (std::sin(angle) * size);
+            const Vec3 vertex = light.position + offset;
+            glVertex3f(vertex.x, vertex.y, vertex.z);
+        }
+        glEnd();
+
+        const float coreSize = size * 0.16f;
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glBegin(GL_TRIANGLE_FAN);
+        glColor4f(1.0f, 1.0f, 1.0f, std::max(alpha, 0.85f));
+        glVertex3f(light.position.x, light.position.y, light.position.z);
+
+        glColor4f(red, green, blue, 0.0f);
+        for (int segment = 0; segment <= SegmentCount; ++segment)
+        {
+            const float angle = TwoPi * static_cast<float>(segment) /
+                static_cast<float>(SegmentCount);
+            const Vec3 offset =
+                right * (std::cos(angle) * coreSize) +
+                up * (std::sin(angle) * coreSize);
+            const Vec3 vertex = light.position + offset;
+            glVertex3f(vertex.x, vertex.y, vertex.z);
+        }
+        glEnd();
+    }
+
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+}
+
 void OpenGLRenderer::DrawModel(
     const ModelData& model,
-    bool wireframe) const
+    bool wireframe,
+    const TxdData* textureDictionary) const
 {
     glPolygonMode(
         GL_FRONT_AND_BACK,
@@ -269,7 +570,8 @@ void OpenGLRenderer::DrawModel(
                 model.geometries[
                     static_cast<std::size_t>(
                         atomic.geometryIndex)],
-                transform);
+                transform,
+                textureDictionary);
         }
 
         return;
@@ -279,21 +581,212 @@ void OpenGLRenderer::DrawModel(
 
     for (const Geometry& geometry : model.geometries)
     {
-        DrawGeometry(geometry, identity);
+        DrawGeometry(geometry, identity, textureDictionary);
     }
 }
 
 void OpenGLRenderer::DrawGeometry(
     const Geometry& geometry,
-    const Mat4& transform) const
+    const Mat4& transform,
+    const TxdData* textureDictionary) const
 {
     glPushMatrix();
     glMultMatrixf(transform.m);
+
+    if (geometry.materials.empty())
+    {
+        DrawMaterialTriangles(
+            geometry,
+            nullptr,
+            std::numeric_limits<std::uint16_t>::max(),
+            nullptr);
+    }
+    else
+    {
+        for (std::size_t materialIndex = 0;
+             materialIndex < geometry.materials.size();
+             ++materialIndex)
+        {
+            const MaterialInfo& material = geometry.materials[materialIndex];
+            const TxdTextureInfo* sourceTexture = FindTexture(
+                textureDictionary,
+                material.textureName);
+
+            const UploadedTexture* uploadedTexture =
+                sourceTexture != nullptr
+                    ? UploadTexture(*sourceTexture)
+                    : nullptr;
+
+            DrawMaterialTriangles(
+                geometry,
+                &material,
+                static_cast<std::uint16_t>(materialIndex),
+                uploadedTexture);
+        }
+
+        DrawMaterialTriangles(
+            geometry,
+            nullptr,
+            std::numeric_limits<std::uint16_t>::max(),
+            nullptr);
+    }
+
+    glDisable(GL_TEXTURE_2D);
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
+    glPopMatrix();
+}
+
+const TxdTextureInfo* OpenGLRenderer::FindTexture(
+    const TxdData* textureDictionary,
+    const std::string& name) const
+{
+    if (textureDictionary == nullptr || name.empty())
+    {
+        return nullptr;
+    }
+
+    const std::string wantedName = NormalizeTextureName(name);
+    for (const TxdTextureInfo& texture : textureDictionary->textures)
+    {
+        if (NormalizeTextureName(texture.name) == wantedName)
+        {
+            return &texture;
+        }
+    }
+
+    return nullptr;
+}
+
+const OpenGLRenderer::UploadedTexture* OpenGLRenderer::UploadTexture(
+    const TxdTextureInfo& texture) const
+{
+    if (texture.mipLevels.empty() || !texture.decodeError.empty())
+    {
+        return nullptr;
+    }
+
+    const std::string key = NormalizeTextureName(texture.name);
+    const auto existing = uploadedTextures.find(key);
+    if (existing != uploadedTextures.end())
+    {
+        return &existing->second;
+    }
+
+    UploadedTexture uploaded{};
+    uploaded.hasAlpha = texture.hasAlpha;
+    glGenTextures(1, &uploaded.id);
+    if (uploaded.id == 0)
+    {
+        return nullptr;
+    }
+
+    glBindTexture(GL_TEXTURE_2D, uploaded.id);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+    for (std::size_t levelIndex = 0;
+         levelIndex < texture.mipLevels.size();
+         ++levelIndex)
+    {
+        const TxdMipLevel& mip = texture.mipLevels[levelIndex];
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            static_cast<GLint>(levelIndex),
+            GL_RGBA,
+            mip.width,
+            mip.height,
+            0,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            mip.rgbaPixels.data());
+    }
+
+    const std::uint32_t filterMode = texture.filterAddressing & 0xFF;
+    const bool hasMipmaps = texture.mipLevels.size() > 1;
+    GLint minimumFilter = GL_LINEAR;
+    GLint magnificationFilter = GL_LINEAR;
+
+    if (filterMode == 1)
+    {
+        minimumFilter = hasMipmaps ? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST;
+        magnificationFilter = GL_NEAREST;
+    }
+    else if (hasMipmaps)
+    {
+        minimumFilter =
+            filterMode == 3 || filterMode == 5
+                ? GL_LINEAR_MIPMAP_NEAREST
+                : GL_LINEAR_MIPMAP_LINEAR;
+    }
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minimumFilter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, magnificationFilter);
+    glTexParameteri(
+        GL_TEXTURE_2D,
+        GL_TEXTURE_WRAP_S,
+        TextureWrapMode((texture.filterAddressing >> 8) & 0x0F));
+    glTexParameteri(
+        GL_TEXTURE_2D,
+        GL_TEXTURE_WRAP_T,
+        TextureWrapMode((texture.filterAddressing >> 12) & 0x0F));
+
+    const auto inserted = uploadedTextures.emplace(key, uploaded);
+    return &inserted.first->second;
+}
+
+void OpenGLRenderer::DrawMaterialTriangles(
+    const Geometry& geometry,
+    const MaterialInfo* material,
+    std::uint16_t materialIndex,
+    const UploadedTexture* texture) const
+{
+    const bool hasTexture = texture != nullptr && texture->id != 0;
+    const bool transparent =
+        (hasTexture && texture->hasAlpha) ||
+        (material != nullptr && material->color.a < 255);
+
+    if (hasTexture)
+    {
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, texture->id);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    }
+    else
+    {
+        glDisable(GL_TEXTURE_2D);
+    }
+
+    if (transparent)
+    {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glDepthMask(GL_FALSE);
+    }
+    else
+    {
+        glDisable(GL_BLEND);
+        glDepthMask(GL_TRUE);
+    }
 
     glBegin(GL_TRIANGLES);
 
     for (const Triangle& triangle : geometry.triangles)
     {
+        const bool unassignedMaterial =
+            triangle.materialIndex >= geometry.materials.size();
+
+        if (materialIndex == std::numeric_limits<std::uint16_t>::max())
+        {
+            if (!unassignedMaterial)
+            {
+                continue;
+            }
+        }
+        else if (triangle.materialIndex != materialIndex)
+        {
+            continue;
+        }
+
         if (triangle.a >= geometry.vertices.size() ||
             triangle.b >= geometry.vertices.size() ||
             triangle.c >= geometry.vertices.size())
@@ -309,25 +802,20 @@ void OpenGLRenderer::DrawGeometry(
 
         for (std::uint32_t index : indices)
         {
-            Color4 color{};
+            Color4 color{255, 255, 255, 255};
 
-            if (index < geometry.colors.size())
+            if (!hasTexture && index < geometry.colors.size())
             {
                 color = geometry.colors[index];
             }
-            else if (
-                triangle.materialIndex <
-                geometry.materials.size())
+            else if (!hasTexture && material != nullptr)
             {
-                color =
-                    geometry.materials[
-                        triangle.materialIndex]
-                        .color;
+                color = material->color;
             }
 
-            if (color.a == 0)
+            if (hasTexture && material != nullptr)
             {
-                color.a = 255;
+                color.a = material->color.a;
             }
 
             glColor4ub(
@@ -347,6 +835,12 @@ void OpenGLRenderer::DrawGeometry(
                     normal.z);
             }
 
+            if (hasTexture && index < geometry.texCoords.size())
+            {
+                const Vec2& texCoord = geometry.texCoords[index];
+                glTexCoord2f(texCoord.x, texCoord.y);
+            }
+
             const Vec3& vertex =
                 geometry.vertices[index];
 
@@ -358,7 +852,24 @@ void OpenGLRenderer::DrawGeometry(
     }
 
     glEnd();
-    glPopMatrix();
+}
+
+void OpenGLRenderer::InvalidateTextures()
+{
+    ReleaseTextures();
+}
+
+void OpenGLRenderer::ReleaseTextures()
+{
+    for (const auto& entry : uploadedTextures)
+    {
+        if (entry.second.id != 0)
+        {
+            glDeleteTextures(1, &entry.second.id);
+        }
+    }
+
+    uploadedTextures.clear();
 }
 
 void OpenGLRenderer::DrawCollision(

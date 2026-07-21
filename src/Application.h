@@ -34,6 +34,11 @@ private:
         float top,
         float right,
         float bottom);
+    void Draw2DFXOverlay(
+        float left,
+        float top,
+        float right,
+        float bottom);
     void HandleViewportInput();
 
     void LoadDffPaths(
@@ -45,6 +50,9 @@ private:
 
     void LoadTxd(
         const std::filesystem::path& path);
+
+    void FindAndLoadMatchingTxd(
+        const std::vector<std::filesystem::path>& dffPaths);
 
     void AttachCollisionToSelected();
     void AttachCollisionToAll();
@@ -87,6 +95,7 @@ private:
     bool optimizeCollision = true;
     bool wireframe = false;
     bool showCollision = true;
+    bool showEffects2D = true;
     bool showGrid = true;
 
     bool viewportHovered = false;

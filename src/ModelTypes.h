@@ -21,6 +21,19 @@ struct MaterialInfo
     std::string maskName;
 };
 
+struct Effect2D
+{
+    Vec3 position{};
+    std::uint32_t type = 0;
+    Color4 color{};
+    float coronaFarClip = 0.0f;
+    float pointLightRange = 0.0f;
+    float coronaSize = 0.0f;
+    float shadowSize = 0.0f;
+    std::uint8_t flags1 = 0;
+    std::uint8_t flags2 = 0;
+};
+
 struct Geometry
 {
     std::string name;
@@ -30,6 +43,7 @@ struct Geometry
     std::vector<Color4> colors;
     std::vector<Triangle> triangles;
     std::vector<MaterialInfo> materials;
+    std::vector<Effect2D> effects2d;
     Bounds bounds;
 };
 
@@ -55,4 +69,8 @@ struct ModelData
     std::vector<Atomic> atomics;
     Bounds bounds;
     std::uint32_t renderWareVersion = 0;
+    bool hasSampCollision = false;
+    bool sampCollisionValid = false;
+    std::size_t effect2dCount = 0;
+    std::size_t omniLightCount = 0;
 };

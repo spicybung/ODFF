@@ -20,6 +20,8 @@ namespace
     constexpr std::uint32_t ChunkAtomic = 0x00000014;
     constexpr std::uint32_t ChunkGeometryList = 0x0000001A;
     constexpr std::uint32_t PluginFrameName = 0x0253F2FE;
+    constexpr std::uint32_t Plugin2DFX = 0x0253F2F8;
+    constexpr std::uint32_t PluginSampCollision = 0x0253F2FF;
 
     constexpr std::uint16_t GeometryFlagTextured = 0x0004;
     constexpr std::uint16_t GeometryFlagPrelit = 0x0008;
@@ -176,6 +178,18 @@ bool RenderWareReader::LoadDff(const std::filesystem::path& path, ModelData& mod
             return false;
         }
 
+        for (const Geometry& geometry : model.geometries)
+        {
+            model.effect2dCount += geometry.effects2d.size();
+            model.omniLightCount += static_cast<std::size_t>(std::count_if(
+                geometry.effects2d.begin(),
+                geometry.effects2d.end(),
+                [](const Effect2D& effect)
+                {
+                    return effect.type == 0;
+                }));
+        }
+
         BuildWorldTransforms(model);
         BuildBounds(model);
         return true;
@@ -292,6 +306,10 @@ bool RenderWareReader::ParseClump(
                 ParseAtomic(reader, child, model);
                 break;
 
+            case ChunkExtension:
+                ParseClumpExtension(reader, child, model);
+                break;
+
             default:
                 break;
         }
@@ -306,6 +324,41 @@ bool RenderWareReader::ParseClump(
     }
 
     return true;
+}
+
+void RenderWareReader::ParseClumpExtension(
+    BinaryReader& reader,
+    const ChunkHeader& extension,
+    ModelData& model)
+{
+    reader.Seek(extension.dataOffset);
+
+    while (reader.Position() + 12 <= extension.endOffset)
+    {
+        ChunkHeader plugin{};
+        if (!ReadChunkHeader(reader, plugin) || plugin.endOffset > extension.endOffset)
+        {
+            break;
+        }
+
+        if (plugin.type == PluginSampCollision)
+        {
+            model.hasSampCollision = true;
+            model.sampCollisionValid = false;
+
+            if (plugin.length >= 32)
+            {
+                reader.Seek(plugin.dataOffset);
+                const std::uint32_t magic = reader.ReadU32();
+                const std::uint32_t declaredSize = reader.ReadU32();
+                model.sampCollisionValid =
+                    magic == 0x334C4F43 &&
+                    declaredSize <= plugin.length - 8;
+            }
+        }
+
+        reader.Seek(plugin.endOffset);
+    }
 }
 
 bool RenderWareReader::ParseFrameList(
@@ -617,13 +670,99 @@ bool RenderWareReader::ParseGeometry(
 
         if (child.type == ChunkMaterialList)
         {
-            ParseMaterialList(reader, child, geometry);
+            if (!ParseMaterialList(reader, child, geometry))
+            {
+                error = "Geometry material list is invalid or incomplete.";
+                return false;
+            }
+        }
+        else if (child.type == ChunkExtension)
+        {
+            ParseGeometryExtension(reader, child, geometry);
         }
 
         reader.Seek(child.endOffset);
     }
 
     return true;
+}
+
+void RenderWareReader::ParseGeometryExtension(
+    BinaryReader& reader,
+    const ChunkHeader& extension,
+    Geometry& geometry)
+{
+    reader.Seek(extension.dataOffset);
+
+    while (reader.Position() + 12 <= extension.endOffset)
+    {
+        ChunkHeader plugin{};
+        if (!ReadChunkHeader(reader, plugin) || plugin.endOffset > extension.endOffset)
+        {
+            break;
+        }
+
+        if (plugin.type == Plugin2DFX)
+        {
+            Parse2DFX(reader, plugin, geometry);
+        }
+
+        reader.Seek(plugin.endOffset);
+    }
+}
+
+void RenderWareReader::Parse2DFX(
+    BinaryReader& reader,
+    const ChunkHeader& plugin,
+    Geometry& geometry)
+{
+    reader.Seek(plugin.dataOffset);
+    if (!reader.CanRead(4))
+    {
+        return;
+    }
+
+    const std::uint32_t count = reader.ReadU32();
+    geometry.effects2d.reserve(geometry.effects2d.size() + count);
+
+    for (std::uint32_t index = 0; index < count; ++index)
+    {
+        if (reader.Position() + 20 > plugin.endOffset)
+        {
+            break;
+        }
+
+        Effect2D effect{};
+        effect.position = {reader.ReadF32(), reader.ReadF32(), reader.ReadF32()};
+        effect.type = reader.ReadU32();
+        const std::size_t payloadSize = reader.ReadU32();
+
+        if (payloadSize > plugin.endOffset - reader.Position())
+        {
+            break;
+        }
+
+        const std::size_t payloadStart = reader.Position();
+
+        if (effect.type == 0 && payloadSize >= 76)
+        {
+            effect.color = {
+                reader.ReadU8(), reader.ReadU8(),
+                reader.ReadU8(), reader.ReadU8()};
+            effect.coronaFarClip = reader.ReadF32();
+            effect.pointLightRange = reader.ReadF32();
+            effect.coronaSize = reader.ReadF32();
+            effect.shadowSize = reader.ReadF32();
+            reader.Skip(4);
+            effect.flags1 = reader.ReadU8();
+            reader.Skip(48);
+            reader.ReadU8();
+            effect.flags2 = reader.ReadU8();
+        }
+
+        geometry.effects2d.push_back(effect);
+        reader.Seek(payloadStart + payloadSize);
+    }
 }
 
 bool RenderWareReader::ParseMaterialList(
@@ -642,15 +781,17 @@ bool RenderWareReader::ParseMaterialList(
     reader.Seek(listStruct.dataOffset);
     const std::uint32_t materialCount = reader.ReadU32();
 
+    std::vector<std::int32_t> materialReferences;
+    materialReferences.reserve(materialCount);
     for (std::uint32_t index = 0; index < materialCount; ++index)
     {
-        reader.ReadI32();
+        materialReferences.push_back(reader.ReadI32());
     }
 
     reader.Seek(listStruct.endOffset);
 
-    while (reader.Position() + 12 <= materialList.endOffset &&
-           geometry.materials.size() < materialCount)
+    std::vector<MaterialInfo> serializedMaterials;
+    while (reader.Position() + 12 <= materialList.endOffset)
     {
         ChunkHeader child{};
         if (!ReadChunkHeader(reader, child))
@@ -662,13 +803,41 @@ bool RenderWareReader::ParseMaterialList(
         {
             MaterialInfo material{};
             ParseMaterial(reader, child, material);
-            geometry.materials.push_back(std::move(material));
+            serializedMaterials.push_back(std::move(material));
         }
 
         reader.Seek(child.endOffset);
     }
 
-    return true;
+    geometry.materials.clear();
+    geometry.materials.reserve(materialCount);
+
+    std::size_t serializedIndex = 0;
+    for (std::size_t slot = 0; slot < materialReferences.size(); ++slot)
+    {
+        const std::int32_t reference = materialReferences[slot];
+        if (reference < 0)
+        {
+            if (serializedIndex >= serializedMaterials.size())
+            {
+                return false;
+            }
+
+            geometry.materials.push_back(
+                std::move(serializedMaterials[serializedIndex++]));
+        }
+        else if (static_cast<std::size_t>(reference) < geometry.materials.size())
+        {
+            geometry.materials.push_back(
+                geometry.materials[static_cast<std::size_t>(reference)]);
+        }
+        else
+        {
+            return false;
+        }
+    }
+
+    return geometry.materials.size() == materialCount;
 }
 
 bool RenderWareReader::ParseMaterial(

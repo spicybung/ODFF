@@ -5,6 +5,13 @@
 #include <string>
 #include <vector>
 
+struct TxdMipLevel
+{
+    std::uint16_t width = 0;
+    std::uint16_t height = 0;
+    std::vector<std::uint8_t> rgbaPixels;
+};
+
 struct TxdTextureInfo
 {
     std::string name;
@@ -16,6 +23,12 @@ struct TxdTextureInfo
     std::uint16_t height = 0;
     std::uint8_t depth = 0;
     std::uint8_t mipmapCount = 0;
+    std::uint8_t rasterType = 0;
+    std::uint8_t compression = 0;
+    std::uint32_t filterAddressing = 0;
+    std::vector<TxdMipLevel> mipLevels;
+    bool hasAlpha = false;
+    std::string decodeError;
 };
 
 struct TxdData

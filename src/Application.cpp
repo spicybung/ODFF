@@ -19,11 +19,47 @@
 #include <iterator>
 #include <limits>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 
 
 namespace
 {
+    void DrawStatusMark(bool passed)
+    {
+        const float size = ImGui::GetTextLineHeight();
+        ImGui::InvisibleButton("##status", ImVec2(size, size));
+
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        const ImVec2 minimum = ImGui::GetItemRectMin();
+        const ImU32 color = passed
+            ? IM_COL32(65, 205, 95, 255)
+            : IM_COL32(235, 70, 70, 255);
+
+        if (passed)
+        {
+            drawList->AddLine(
+                ImVec2(minimum.x + size * 0.16f, minimum.y + size * 0.53f),
+                ImVec2(minimum.x + size * 0.40f, minimum.y + size * 0.78f),
+                color, 2.5f);
+            drawList->AddLine(
+                ImVec2(minimum.x + size * 0.40f, minimum.y + size * 0.78f),
+                ImVec2(minimum.x + size * 0.86f, minimum.y + size * 0.20f),
+                color, 2.5f);
+        }
+        else
+        {
+            drawList->AddLine(
+                ImVec2(minimum.x + size * 0.22f, minimum.y + size * 0.22f),
+                ImVec2(minimum.x + size * 0.78f, minimum.y + size * 0.78f),
+                color, 2.5f);
+            drawList->AddLine(
+                ImVec2(minimum.x + size * 0.78f, minimum.y + size * 0.22f),
+                ImVec2(minimum.x + size * 0.22f, minimum.y + size * 0.78f),
+                color, 2.5f);
+        }
+    }
+
     struct CollisionOverlayEdge
     {
         std::uint32_t first = 0;
@@ -76,6 +112,48 @@ namespace
             std::isfinite(point.x) &&
             std::isfinite(point.y) &&
             std::isfinite(point.z);
+    }
+
+    std::string NormalizeMaterialTextureName(std::string name)
+    {
+        const std::size_t slash = name.find_last_of("/\\");
+        if (slash != std::string::npos)
+        {
+            name.erase(0, slash + 1);
+        }
+
+        const std::size_t dot = name.find_last_of('.');
+        if (dot != std::string::npos)
+        {
+            name.erase(dot);
+        }
+
+        std::transform(
+            name.begin(),
+            name.end(),
+            name.begin(),
+            [](unsigned char character)
+            {
+                return static_cast<char>(std::tolower(character));
+            });
+
+        return name;
+    }
+
+    bool HasExtension(
+        const std::filesystem::path& path,
+        const std::string& wantedExtension)
+    {
+        std::string extension = path.extension().string();
+        std::transform(
+            extension.begin(),
+            extension.end(),
+            extension.begin(),
+            [](unsigned char character)
+            {
+                return static_cast<char>(std::tolower(character));
+            });
+        return extension == wantedExtension;
     }
 
     bool ClipLineToRectangle(
@@ -157,7 +235,7 @@ bool Application::Initialize()
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
 
-    window = glfwCreateWindow(1280, 820, "ODFF v0.1.9", nullptr, nullptr);
+    window = glfwCreateWindow(1280, 820, "ODFF v0.2.0", nullptr, nullptr);
     if (window == nullptr)
     {
         glfwTerminate();
@@ -270,6 +348,8 @@ int Application::Run()
 
 void Application::Shutdown()
 {
+    renderer.ReleaseTextures();
+
     ImGui_ImplOpenGL2_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
@@ -316,6 +396,8 @@ void Application::DrawToolbar()
     ImGui::SameLine();
     ImGui::Checkbox("Collision", &showCollision);
     ImGui::SameLine();
+    ImGui::Checkbox("2DFX lights", &showEffects2D);
+    ImGui::SameLine();
     ImGui::Checkbox("Grid", &showGrid);
 
     ImGui::SameLine();
@@ -328,7 +410,7 @@ void Application::DrawToolbar()
             "A program for embedding SAMP collision in DFFs\n\n"
             "https://github.com/spicybung\n\n"
             "Reigns Studios\n\n"
-            "v 0.1.9 2026",
+            "v 0.2.0 2026",
             "About ODFF",
             MB_OK | MB_ICONINFORMATION);
 #endif
@@ -344,6 +426,12 @@ void Application::DrawModelList()
     {
         const bool selected = index == selectedIndex;
 
+        ImGui::PushID(static_cast<int>(index));
+        DrawStatusMark(
+            documents[index]->model.hasSampCollision &&
+            documents[index]->model.sampCollisionValid);
+        ImGui::SameLine();
+
         if (ImGui::Selectable(documents[index]->displayName.c_str(), selected))
         {
             selectedIndex = index;
@@ -354,6 +442,8 @@ void Application::DrawModelList()
         {
             ImGui::SetItemDefaultFocus();
         }
+
+        ImGui::PopID();
     }
 }
 
@@ -377,15 +467,72 @@ void Application::DrawProperties()
 
         std::size_t vertexCount = 0;
         std::size_t triangleCount = 0;
+        std::size_t materialCount = 0;
+        std::unordered_set<std::string> textureReferences;
 
         for (const Geometry& geometry : document->model.geometries)
         {
             vertexCount += geometry.vertices.size();
             triangleCount += geometry.triangles.size();
+            materialCount += geometry.materials.size();
+
+            for (const MaterialInfo& material : geometry.materials)
+            {
+                const std::string textureName =
+                    NormalizeMaterialTextureName(material.textureName);
+                if (!textureName.empty())
+                {
+                    textureReferences.insert(textureName);
+                }
+            }
         }
 
         ImGui::Text("Vertices: %zu", vertexCount);
         ImGui::Text("Triangles: %zu", triangleCount);
+        ImGui::Text("Materials: %zu", materialCount);
+
+        std::size_t resolvedTextures = 0;
+        for (const std::string& reference : textureReferences)
+        {
+            const auto found = std::find_if(
+                txd.textures.begin(),
+                txd.textures.end(),
+                [&](const TxdTextureInfo& texture)
+                {
+                    return
+                        texture.decodeError.empty() &&
+                        !texture.mipLevels.empty() &&
+                        NormalizeMaterialTextureName(texture.name) == reference;
+                });
+
+            if (found != txd.textures.end())
+            {
+                ++resolvedTextures;
+            }
+        }
+
+        ImGui::Text(
+            "Textures: %zu/%zu resolved",
+            resolvedTextures,
+            textureReferences.size());
+
+        const bool collisionPassed =
+            document->model.hasSampCollision &&
+            document->model.sampCollisionValid;
+
+        ImGui::PushID("collision-status");
+        DrawStatusMark(collisionPassed);
+        ImGui::SameLine();
+        ImGui::TextUnformatted(
+            collisionPassed
+                ? "SAMP Collision: passing"
+                : "SAMP Collision: failing");
+        ImGui::PopID();
+
+        ImGui::Text(
+            "2DFX lights: %zu working (%zu total effects)",
+            document->model.omniLightCount,
+            document->model.effect2dCount);
     }
 
     ImGui::Spacing();
@@ -485,15 +632,36 @@ void Application::DrawProperties()
         for (const TxdTextureInfo& texture : txd.textures)
         {
             ImGui::Text("%s", texture.name.empty() ? "<unnamed>" : texture.name.c_str());
+            if (!texture.decodeError.empty())
+            {
+                ImGui::SameLine();
+                ImGui::TextDisabled("[decode failed]");
+            }
+            else
+            {
+                ImGui::SameLine();
+                ImGui::TextDisabled("[%zu mip%s decoded]",
+                    texture.mipLevels.size(),
+                    texture.mipLevels.size() == 1 ? "" : "s");
+            }
+
             if (ImGui::IsItemHovered())
             {
-                ImGui::SetTooltip(
-                    "%ux%u, %u-bit, %u mipmaps, platform %u",
-                    texture.width,
-                    texture.height,
-                    texture.depth,
-                    texture.mipmapCount,
-                    texture.platformId);
+                if (texture.decodeError.empty())
+                {
+                    ImGui::SetTooltip(
+                        "%ux%u, %u-bit, %u mipmaps, platform %u%s",
+                        texture.width,
+                        texture.height,
+                        texture.depth,
+                        texture.mipmapCount,
+                        texture.platformId,
+                        texture.hasAlpha ? ", alpha" : "");
+                }
+                else
+                {
+                    ImGui::SetTooltip("%s", texture.decodeError.c_str());
+                }
             }
         }
         ImGui::EndChild();
@@ -509,7 +677,6 @@ void Application::DrawStatusBar()
 void Application::DrawViewport()
 {
     const ImVec2 available = ImGui::GetContentRegionAvail();
-    const ImVec2 viewportPosition = ImGui::GetCursorScreenPos();
 
     ImGui::InvisibleButton(
         "OpenGLViewport",
@@ -587,16 +754,13 @@ void Application::DrawViewport()
             glEnable(GL_SCISSOR_TEST);
             glScissor(x, y, width, height);
 
-            glClearColor(
-                0.8666667f,
-                0.8823529f,
-                0.9803922f,
-                1.0f);
+            const ModelDocument* document = application->SelectedDocument();
+            glClearColor(0.018f, 0.027f, 0.070f, 1.0f);
 
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
             application->renderer.Render(
-                application->SelectedDocument(),
+                document,
                 application->camera,
                 x,
                 y,
@@ -604,7 +768,11 @@ void Application::DrawViewport()
                 height,
                 application->wireframe,
                 application->showCollision,
-                application->showGrid);
+                application->showEffects2D,
+                application->showGrid,
+                application->txd.sourcePath.empty()
+                    ? nullptr
+                    : &application->txd);
 
             glMatrixMode(GL_MODELVIEW);
             glPopMatrix();
@@ -619,12 +787,171 @@ void Application::DrawViewport()
 
     drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
 
+    Draw2DFXOverlay(
+        viewportMinimum.x,
+        viewportMinimum.y,
+        viewportMaximum.x,
+        viewportMaximum.y);
+
     DrawCollisionOverlay(
         viewportMinimum.x,
         viewportMinimum.y,
         viewportMaximum.x,
         viewportMaximum.y);
 
+}
+
+void Application::Draw2DFXOverlay(
+    float left,
+    float top,
+    float right,
+    float bottom)
+{
+    const ModelDocument* document = SelectedDocument();
+    if (!showEffects2D ||
+        document == nullptr ||
+        document->model.omniLightCount == 0 ||
+        right - left <= 1.0f ||
+        bottom - top <= 1.0f)
+    {
+        return;
+    }
+
+    struct PreviewLight
+    {
+        Vec3 position{};
+        const Effect2D* effect = nullptr;
+    };
+
+    std::vector<PreviewLight> lights;
+    lights.reserve(document->model.omniLightCount);
+
+    auto collectLights = [&](const Geometry& geometry, const Mat4& transform)
+    {
+        for (const Effect2D& effect : geometry.effects2d)
+        {
+            if (effect.type == 0 &&
+                effect.coronaSize > 0.0f &&
+                (effect.flags1 & 8) == 0)
+            {
+                lights.push_back({
+                    TransformPoint(transform, effect.position),
+                    &effect});
+            }
+        }
+    };
+
+    if (!document->model.atomics.empty())
+    {
+        for (const Atomic& atomic : document->model.atomics)
+        {
+            if (atomic.geometryIndex < 0 ||
+                static_cast<std::size_t>(atomic.geometryIndex) >=
+                    document->model.geometries.size())
+            {
+                continue;
+            }
+
+            Mat4 transform{};
+            if (atomic.frameIndex >= 0 &&
+                static_cast<std::size_t>(atomic.frameIndex) <
+                    document->model.frames.size())
+            {
+                transform = document->model.frames[
+                    static_cast<std::size_t>(atomic.frameIndex)].worldTransform;
+            }
+
+            collectLights(
+                document->model.geometries[
+                    static_cast<std::size_t>(atomic.geometryIndex)],
+                transform);
+        }
+    }
+    else
+    {
+        for (const Geometry& geometry : document->model.geometries)
+        {
+            collectLights(geometry, Mat4{});
+        }
+    }
+
+    const Vec3 eye = camera.Position();
+    const Vec3 cameraForward = camera.Forward();
+    const Vec3 cameraRight = camera.Right();
+    const Vec3 cameraUp = camera.Up();
+
+    const float viewportWidth = right - left;
+    const float viewportHeight = bottom - top;
+    const float aspect = viewportWidth / viewportHeight;
+    constexpr float fieldOfViewDegrees = 55.0f;
+    constexpr float pi = 3.14159265358979323846f;
+    const float tangentHalfFieldOfView = std::tan(
+        fieldOfViewDegrees * pi / 360.0f);
+
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    drawList->PushClipRect(ImVec2(left, top), ImVec2(right, bottom), true);
+
+    for (const PreviewLight& light : lights)
+    {
+        const Vec3 relative = light.position - eye;
+        const float depth = Dot(relative, cameraForward);
+        if (depth <= 0.001f)
+        {
+            continue;
+        }
+
+        const float viewX = Dot(relative, cameraRight);
+        const float viewY = Dot(relative, cameraUp);
+        const float normalizedX =
+            viewX / (depth * tangentHalfFieldOfView * aspect);
+        const float normalizedY =
+            viewY / (depth * tangentHalfFieldOfView);
+
+        const ImVec2 center(
+            left + (normalizedX + 1.0f) * viewportWidth * 0.5f,
+            top + (1.0f - normalizedY) * viewportHeight * 0.5f);
+
+        if (center.x < left || center.x > right ||
+            center.y < top || center.y > bottom)
+        {
+            continue;
+        }
+
+        const float pixelsPerUnit =
+            viewportHeight / (2.0f * depth * tangentHalfFieldOfView);
+        const float radius = std::clamp(
+            light.effect->coronaSize * pixelsPerUnit,
+            8.0f,
+            240.0f);
+
+        const int red = light.effect->color.r;
+        const int green = light.effect->color.g;
+        const int blue = light.effect->color.b;
+        const float savedAlpha =
+            static_cast<float>(light.effect->color.a) / 255.0f;
+
+        constexpr int layers = 14;
+        for (int layer = layers; layer >= 1; --layer)
+        {
+            const float amount =
+                static_cast<float>(layer) / static_cast<float>(layers);
+            const int alpha = static_cast<int>(
+                (5.0f + (1.0f - amount) * 18.0f) * savedAlpha);
+            drawList->AddCircleFilled(
+                center,
+                radius * amount,
+                IM_COL32(red, green, blue, alpha),
+                48);
+        }
+
+        drawList->AddCircleFilled(
+            center,
+            std::max(radius * 0.11f, 3.0f),
+            IM_COL32(255, 255, 255, 245),
+            32);
+    }
+
+    drawList->PopClipRect();
 }
 
 
@@ -988,6 +1315,11 @@ void Application::LoadDffPaths(
     }
 
     SetStatus(status.str());
+
+    if (loadedCount != 0)
+    {
+        FindAndLoadMatchingTxd(paths);
+    }
 }
 
 void Application::LoadDffFolder(const std::filesystem::path& folder)
@@ -1044,6 +1376,7 @@ void Application::LoadTxd(const std::filesystem::path& path)
     }
 
     txd = std::move(loaded);
+    renderer.InvalidateTextures();
 
     std::ostringstream status;
     status << "Loaded TXD " << path.filename().string()
@@ -1053,6 +1386,166 @@ void Application::LoadTxd(const std::filesystem::path& path)
         status << "s";
     }
 
+    SetStatus(status.str());
+}
+
+void Application::FindAndLoadMatchingTxd(
+    const std::vector<std::filesystem::path>& dffPaths)
+{
+    std::unordered_set<std::string> requiredNames;
+    for (const std::unique_ptr<ModelDocument>& document : documents)
+    {
+        for (const Geometry& geometry : document->model.geometries)
+        {
+            for (const MaterialInfo& material : geometry.materials)
+            {
+                const std::string name =
+                    NormalizeMaterialTextureName(material.textureName);
+                if (!name.empty())
+                {
+                    requiredNames.insert(name);
+                }
+            }
+        }
+    }
+
+    if (requiredNames.empty())
+    {
+        return;
+    }
+
+    std::unordered_set<std::string> seenDirectories;
+    std::vector<std::filesystem::path> searchDirectories;
+
+    auto addDirectory = [&](const std::filesystem::path& directory)
+    {
+        if (directory.empty())
+        {
+            return;
+        }
+
+        std::error_code error;
+        if (!std::filesystem::is_directory(directory, error))
+        {
+            return;
+        }
+
+        const std::string key = directory.lexically_normal().string();
+        if (seenDirectories.insert(key).second)
+        {
+            searchDirectories.push_back(directory);
+        }
+    };
+
+    for (const std::filesystem::path& dffPath : dffPaths)
+    {
+        const std::filesystem::path modelDirectory = dffPath.parent_path();
+        const std::filesystem::path assetDirectory = modelDirectory.parent_path();
+        addDirectory(modelDirectory);
+        addDirectory(assetDirectory);
+
+        std::error_code error;
+        for (std::filesystem::directory_iterator iterator(assetDirectory, error);
+             !error && iterator != std::filesystem::directory_iterator();
+             iterator.increment(error))
+        {
+            if (!iterator->is_directory(error))
+            {
+                continue;
+            }
+
+            std::string folderName = iterator->path().filename().string();
+            std::transform(
+                folderName.begin(),
+                folderName.end(),
+                folderName.begin(),
+                [](unsigned char character)
+                {
+                    return static_cast<char>(std::tolower(character));
+                });
+
+            if (folderName == "txd" ||
+                folderName == "textures" ||
+                folderName == "texture")
+            {
+                addDirectory(iterator->path());
+            }
+        }
+    }
+
+    std::vector<std::filesystem::path> candidates;
+    std::unordered_set<std::string> seenCandidates;
+    for (const std::filesystem::path& directory : searchDirectories)
+    {
+        std::error_code error;
+        for (std::filesystem::directory_iterator iterator(directory, error);
+             !error && iterator != std::filesystem::directory_iterator();
+             iterator.increment(error))
+        {
+            if (!iterator->is_regular_file(error) ||
+                !HasExtension(iterator->path(), ".txd"))
+            {
+                continue;
+            }
+
+            const std::string key = iterator->path().lexically_normal().string();
+            if (seenCandidates.insert(key).second)
+            {
+                candidates.push_back(iterator->path());
+            }
+        }
+    }
+
+    std::sort(candidates.begin(), candidates.end());
+
+    std::size_t bestScore = 0;
+    TxdData bestDictionary{};
+    for (const std::filesystem::path& candidate : candidates)
+    {
+        TxdData candidateDictionary{};
+        std::string error;
+        if (!txdReader.Load(candidate, candidateDictionary, error))
+        {
+            continue;
+        }
+
+        std::size_t score = 0;
+        for (const TxdTextureInfo& texture : candidateDictionary.textures)
+        {
+            if (requiredNames.count(NormalizeMaterialTextureName(texture.name)) != 0)
+            {
+                ++score;
+            }
+        }
+
+        if (score > bestScore)
+        {
+            bestScore = score;
+            bestDictionary = std::move(candidateDictionary);
+        }
+
+        if (bestScore == requiredNames.size())
+        {
+            break;
+        }
+    }
+
+    if (bestScore == 0)
+    {
+        return;
+    }
+
+    txd = std::move(bestDictionary);
+    renderer.InvalidateTextures();
+
+    std::ostringstream status;
+    status << "Auto-loaded TXD " << txd.sourcePath.filename().string()
+           << ": matched " << bestScore << " of "
+           << requiredNames.size() << " referenced texture";
+    if (requiredNames.size() != 1)
+    {
+        status << "s";
+    }
     SetStatus(status.str());
 }
 
