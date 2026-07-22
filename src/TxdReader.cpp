@@ -817,32 +817,32 @@ bool TxdReader::Load(const std::filesystem::path& path, TxdData& txd, std::strin
             if (!info.decodeError.empty())
             {
                 info.sampCompatibility =
-                    "SA-MP/open.mp preview unavailable because decoding failed.";
+                    "Could not read this texture.";
             }
             else if (!info.hasAlpha)
             {
                 info.sampCompatibility =
-                    "SA-MP/open.mp: opaque texture.";
+                    "No alpha.";
             }
             else if (preferredDxt3Alpha)
             {
                 info.sampCompatibility =
-                    "SA-MP/open.mp preferred alpha: DXT3 compressed alpha.";
+                    "DXT3 alpha. Works well in SA-MP/open.mp.";
             }
             else if (experimentalDxt5Alpha)
             {
                 info.sampCompatibility =
-                    "SA-MP/open.mp: DXT5 alpha is unverified/avoid based on current in-game testing; preview forced opaque. Base dimensions alone do not establish compatibility.";
+                    "DXT5 alpha is disabled. It has not worked reliably in SA-MP/open.mp.";
             }
             else if (fallbackUncompressedAlpha)
             {
                 info.sampCompatibility =
-                    "SA-MP/open.mp accepted fallback alpha: uncompressed 32-bit A8R8G8B8; larger than DXT3.";
+                    "32-bit alpha. Works in SA-MP/open.mp, but uses more space.";
             }
             else
             {
                 info.sampCompatibility =
-                    "SA-MP/open.mp alpha is not covered by the verified DXT3 or A8R8G8B8 rules; preview forced opaque.";
+                    "Alpha is disabled because this format has not been confirmed to work.";
             }
 
             txd.textures.push_back(std::move(info));

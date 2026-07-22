@@ -185,7 +185,6 @@ void OpenGLRenderer::Render(
     bool wireframe,
     bool showCollision,
     bool showEffects2D,
-    bool previewBuiltInTrafficModel,
     bool showGrid,
     const TxdData* textureDictionary) const
 {
@@ -274,9 +273,7 @@ void OpenGLRenderer::Render(
 
         if (showEffects2D)
         {
-            DrawEffects2D(
-                document->model,
-                previewBuiltInTrafficModel);
+            DrawEffects2D(document->model);
         }
 
     }
@@ -289,13 +286,8 @@ void OpenGLRenderer::Render(
 }
 
 void OpenGLRenderer::DrawEffects2D(
-    const ModelData& model,
-    bool previewBuiltInTrafficModel) const
+    const ModelData& model) const
 {
-    if (model.trafficLightSignature && !previewBuiltInTrafficModel)
-    {
-        return;
-    }
     std::vector<WorldLight> lights;
     lights.reserve(model.omniLightCount);
 
@@ -486,7 +478,10 @@ void OpenGLRenderer::DrawLightGlows(
         const float red = static_cast<float>(light.effect.color.r) / 255.0f;
         const float green = static_cast<float>(light.effect.color.g) / 255.0f;
         const float blue = static_cast<float>(light.effect.color.b) / 255.0f;
-        const float alpha = static_cast<float>(light.effect.color.a) / 255.0f;
+        const float sourceAlpha =
+            static_cast<float>(light.effect.color.a) / 255.0f;
+        const float glowAlpha = std::clamp(sourceAlpha * 0.35f, 0.08f, 0.35f);
+        const float coreAlpha = std::clamp(sourceAlpha * 0.42f, 0.12f, 0.42f);
 
         if ((light.effect.flags1 & 1) != 0)
         {
@@ -499,7 +494,7 @@ void OpenGLRenderer::DrawLightGlows(
 
         glBlendFunc(GL_SRC_ALPHA, GL_ONE);
         glBegin(GL_TRIANGLE_FAN);
-        glColor4f(red, green, blue, alpha);
+        glColor4f(red, green, blue, glowAlpha);
         glVertex3f(light.position.x, light.position.y, light.position.z);
 
         glColor4f(red, green, blue, 0.0f);
@@ -518,7 +513,7 @@ void OpenGLRenderer::DrawLightGlows(
         const float coreSize = size * 0.16f;
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glBegin(GL_TRIANGLE_FAN);
-        glColor4f(1.0f, 1.0f, 1.0f, std::max(alpha, 0.85f));
+        glColor4f(1.0f, 1.0f, 1.0f, coreAlpha);
         glVertex3f(light.position.x, light.position.y, light.position.z);
 
         glColor4f(red, green, blue, 0.0f);

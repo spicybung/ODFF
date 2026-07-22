@@ -33,9 +33,9 @@ struct CollisionData
 class CollisionBuilder
 {
 public:
-    CollisionData Build(const ModelData& model, CollisionMode mode, bool optimize) const;
+    CollisionData Build(const ModelData& model, CollisionMode mode) const;
 
 private:
     CollisionData BuildBox(const ModelData& model) const;
-    CollisionData BuildMesh(const ModelData& model, bool optimize) const;
+    CollisionData BuildMesh(const ModelData& model) const;
 };

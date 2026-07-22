@@ -93,12 +93,10 @@ private:
     std::size_t selectedIndex = 0;
     TxdData txd;
 
-    CollisionMode collisionMode = CollisionMode::Empty;
-    bool optimizeCollision = true;
+    CollisionMode collisionMode = CollisionMode::Box;
     bool wireframe = false;
     bool showCollision = true;
     bool showEffects2D = true;
-    bool previewBuiltInTrafficModel = false;
     bool showGrid = true;
 
     bool viewportHovered = false;

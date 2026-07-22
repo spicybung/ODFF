@@ -3,44 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <unordered_map>
 
 namespace
 {
-    struct QuantizedVertex
-    {
-        int x = 0;
-        int y = 0;
-        int z = 0;
-
-        bool operator==(const QuantizedVertex& other) const
-        {
-            return x == other.x && y == other.y && z == other.z;
-        }
-    };
-
-    struct QuantizedVertexHash
-    {
-        std::size_t operator()(const QuantizedVertex& value) const
-        {
-            const std::size_t h1 = std::hash<int>{}(value.x);
-            const std::size_t h2 = std::hash<int>{}(value.y);
-            const std::size_t h3 = std::hash<int>{}(value.z);
-            return h1 ^ (h2 << 1) ^ (h3 << 2);
-        }
-    };
-
-    QuantizedVertex Quantize(const Vec3& value)
-    {
-        constexpr float scale = 10000.0f;
-
-        return {
-            static_cast<int>(value.x * scale),
-            static_cast<int>(value.y * scale),
-            static_cast<int>(value.z * scale)
-        };
-    }
-
     bool IsFiniteVector(const Vec3& value)
     {
         return
@@ -96,8 +61,7 @@ namespace
 
 CollisionData CollisionBuilder::Build(
     const ModelData& model,
-    CollisionMode mode,
-    bool optimize) const
+    CollisionMode mode) const
 {
     switch (mode)
     {
@@ -108,7 +72,7 @@ CollisionData CollisionBuilder::Build(
             return BuildBox(model);
 
         case CollisionMode::MeshFaces:
-            return BuildMesh(model, optimize);
+            return BuildMesh(model);
     }
 
     return {};
@@ -157,47 +121,59 @@ CollisionData CollisionBuilder::BuildBox(const ModelData& model) const
 }
 
 CollisionData CollisionBuilder::BuildMesh(
-    const ModelData& model,
-    bool optimize) const
+    const ModelData& model) const
 {
     CollisionData collision{};
     collision.mode = CollisionMode::MeshFaces;
 
-    std::unordered_map<QuantizedVertex, std::uint16_t, QuantizedVertexHash> optimizedVertices;
-
-    auto appendVertex = [&](const Vec3& vertex) -> std::uint16_t
-    {
-        if (!optimize)
-        {
-            if (collision.vertices.size() >= std::numeric_limits<std::uint16_t>::max())
-            {
-                return std::numeric_limits<std::uint16_t>::max();
-            }
-
-            collision.vertices.push_back(vertex);
-            return static_cast<std::uint16_t>(collision.vertices.size() - 1);
-        }
-
-        const QuantizedVertex key = Quantize(vertex);
-        const auto found = optimizedVertices.find(key);
-        if (found != optimizedVertices.end())
-        {
-            return found->second;
-        }
-
-        if (collision.vertices.size() >= std::numeric_limits<std::uint16_t>::max())
-        {
-            return std::numeric_limits<std::uint16_t>::max();
-        }
-
-        const std::uint16_t index = static_cast<std::uint16_t>(collision.vertices.size());
-        collision.vertices.push_back(vertex);
-        optimizedVertices.emplace(key, index);
-        return index;
-    };
-
     auto appendGeometry = [&](const Geometry& geometry, const Mat4& transform)
     {
+        constexpr std::uint32_t missingIndex =
+            std::numeric_limits<std::uint32_t>::max();
+
+        constexpr std::size_t maximumCollisionVertexCount =
+            static_cast<std::size_t>(
+                std::numeric_limits<std::uint16_t>::max()) + 1;
+
+        std::vector<std::uint32_t> vertexMap(
+            geometry.vertices.size(),
+            missingIndex);
+
+        auto appendVertex = [&](std::uint32_t sourceIndex) -> std::uint32_t
+        {
+            if (sourceIndex >= geometry.vertices.size())
+            {
+                return missingIndex;
+            }
+
+            std::uint32_t& mappedIndex = vertexMap[sourceIndex];
+            if (mappedIndex != missingIndex)
+            {
+                return mappedIndex;
+            }
+
+            if (collision.vertices.size() >= maximumCollisionVertexCount)
+            {
+                return missingIndex;
+            }
+
+            const Vec3 transformed = TransformPoint(
+                transform,
+                geometry.vertices[sourceIndex]);
+
+            if (!IsFiniteVector(transformed))
+            {
+                return missingIndex;
+            }
+
+            mappedIndex = static_cast<std::uint32_t>(
+                collision.vertices.size());
+
+            collision.vertices.push_back(transformed);
+            collision.bounds.Expand(transformed);
+            return mappedIndex;
+        };
+
         for (const Triangle& triangle : geometry.triangles)
         {
             if (triangle.a >= geometry.vertices.size() ||
@@ -224,17 +200,13 @@ CollisionData CollisionBuilder::BuildMesh(
                 continue;
             }
 
-            collision.bounds.Expand(a);
-            collision.bounds.Expand(b);
-            collision.bounds.Expand(c);
+            const std::uint32_t ia = appendVertex(triangle.a);
+            const std::uint32_t ib = appendVertex(triangle.b);
+            const std::uint32_t ic = appendVertex(triangle.c);
 
-            const std::uint16_t ia = appendVertex(a);
-            const std::uint16_t ib = appendVertex(b);
-            const std::uint16_t ic = appendVertex(c);
-
-            if (ia == std::numeric_limits<std::uint16_t>::max() ||
-                ib == std::numeric_limits<std::uint16_t>::max() ||
-                ic == std::numeric_limits<std::uint16_t>::max())
+            if (ia == missingIndex ||
+                ib == missingIndex ||
+                ic == missingIndex)
             {
                 continue;
             }
@@ -245,10 +217,11 @@ CollisionData CollisionBuilder::BuildMesh(
             }
 
             collision.faces.push_back({
-                ia,
-                ib,
-                ic,
-                static_cast<std::uint8_t>(triangle.materialIndex & 0xFF),
+                static_cast<std::uint16_t>(ia),
+                static_cast<std::uint16_t>(ib),
+                static_cast<std::uint16_t>(ic),
+                static_cast<std::uint8_t>(
+                    triangle.materialIndex & 0xFF),
                 0
             });
         }
@@ -259,20 +232,25 @@ CollisionData CollisionBuilder::BuildMesh(
         for (const Atomic& atomic : model.atomics)
         {
             if (atomic.geometryIndex < 0 ||
-                static_cast<std::size_t>(atomic.geometryIndex) >= model.geometries.size())
+                static_cast<std::size_t>(atomic.geometryIndex) >=
+                    model.geometries.size())
             {
                 continue;
             }
 
             Mat4 transform{};
             if (atomic.frameIndex >= 0 &&
-                static_cast<std::size_t>(atomic.frameIndex) < model.frames.size())
+                static_cast<std::size_t>(atomic.frameIndex) <
+                    model.frames.size())
             {
-                transform = model.frames[static_cast<std::size_t>(atomic.frameIndex)].worldTransform;
+                transform = model.frames[
+                    static_cast<std::size_t>(atomic.frameIndex)]
+                    .worldTransform;
             }
 
             appendGeometry(
-                model.geometries[static_cast<std::size_t>(atomic.geometryIndex)],
+                model.geometries[
+                    static_cast<std::size_t>(atomic.geometryIndex)],
                 transform);
         }
     }

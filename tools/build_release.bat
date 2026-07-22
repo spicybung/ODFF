@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableExtensions
-title ODFF 0.2.0 Release Build
+title ODFF 0.2.1 Release Build
 
 cd /d "%~dp0.."
 if errorlevel 1 (
@@ -37,31 +37,31 @@ echo ODFF source: %CD%
 echo CMake: "%CMAKE_EXE%"
 echo.
 
-"%CMAKE_EXE%" -S "%CD%" -B "%CD%\build-0.2.0" -G "Visual Studio 17 2022" -A x64
+"%CMAKE_EXE%" -S "%CD%" -B "%CD%\build-0.2.1" -G "Visual Studio 17 2022" -A x64
 if errorlevel 1 (
     echo.
     echo ERROR: CMake configuration failed.
     goto :failed
 )
 
-"%CMAKE_EXE%" --build "%CD%\build-0.2.0" --config Release --parallel
+"%CMAKE_EXE%" --build "%CD%\build-0.2.1" --config Release --parallel
 if errorlevel 1 (
     echo.
     echo ERROR: Compilation failed.
     goto :failed
 )
 
-if not exist "%CD%\build-0.2.0\Standalone\ODFF.exe" (
+if not exist "%CD%\build-0.2.1\Standalone\ODFF.exe" (
     echo.
     echo ERROR: The build completed but ODFF.exe was not found.
     goto :failed
 )
 
 echo.
-echo ODFF 0.2.0 was built successfully.
+echo ODFF 0.2.1 was built successfully.
 echo.
 echo Executable:
-echo %CD%\build-0.2.0\Standalone\ODFF.exe
+echo %CD%\build-0.2.1\Standalone\ODFF.exe
 echo.
 pause
 exit /b 0

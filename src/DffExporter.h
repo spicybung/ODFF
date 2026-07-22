@@ -16,6 +16,11 @@ public:
         const std::filesystem::path& outputPath,
         std::string& error) const;
 
+    bool DetachCollisionFromDocument(
+        ModelDocument& document,
+        bool& detached,
+        std::string& error) const;
+
 private:
     struct ChunkLocation
     {
@@ -34,6 +39,7 @@ private:
 
     bool RemoveEmbeddedCollision(
         std::vector<std::uint8_t>& dffBytes,
+        bool& removedCollision,
         std::string& error) const;
 
     bool EmbedSampCollision(

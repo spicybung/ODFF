@@ -235,7 +235,7 @@ bool Application::Initialize()
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
 
-    window = glfwCreateWindow(1280, 820, "ODFF v0.2.2", nullptr, nullptr);
+    window = glfwCreateWindow(1280, 820, "ODFF v0.2.1", nullptr, nullptr);
     if (window == nullptr)
     {
         glfwTerminate();
@@ -396,15 +396,7 @@ void Application::DrawToolbar()
     ImGui::SameLine();
     ImGui::Checkbox("Collision", &showCollision);
     ImGui::SameLine();
-    ImGui::Checkbox("2DFX lights", &showEffects2D);
-    ImGui::SameLine();
-    ImGui::Checkbox("Built-in traffic ID", &previewBuiltInTrafficModel);
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
-    {
-        ImGui::SetTooltip(
-            "Enable GTA SA's built-in traffic-light behavior in the preview.\n"
-            "Leave this off to preview a negative AddSimpleModel ID.");
-    }
+    ImGui::Checkbox("Omni lights", &showEffects2D);
     ImGui::SameLine();
     ImGui::Checkbox("Grid", &showGrid);
 
@@ -415,10 +407,10 @@ void Application::DrawToolbar()
 #ifdef _WIN32
         MessageBoxA(
             nullptr,
-            "A program for embedding SAMP collision in DFFs\n\n"
+            "View DFF and TXD files, and add or remove collision.\n\n"
             "https://github.com/spicybung\n\n"
             "Reigns Studios\n\n"
-            "v 0.2.2 2026",
+            "v 0.2.1 2026",
             "About ODFF",
             MB_OK | MB_ICONINFORMATION);
 #endif
@@ -442,8 +434,7 @@ void Application::DrawModelList()
              documents[index]->model.sampCollisionValid);
 
         const bool collisionStateAccepted =
-            documents[index]->collisionExportMode ==
-                CollisionExportMode::Remove ||
+            documents[index]->collisionDetached ||
             documents[index]->collisionExportMode ==
                 CollisionExportMode::AttachOrReplace ||
             sourceCollisionValid;
@@ -475,14 +466,14 @@ void Application::DrawProperties()
 
     if (document == nullptr)
     {
-        ImGui::TextDisabled("No DFF loaded.");
+        ImGui::TextDisabled("No DFF open.");
     }
     else
     {
         ImGui::TextWrapped("%s", document->displayName.c_str());
-        ImGui::Text("Geometries: %zu", document->model.geometries.size());
+        ImGui::Text("Meshes: %zu", document->model.geometries.size());
         ImGui::Text("Frames: %zu", document->model.frames.size());
-        ImGui::Text("Atomics: %zu", document->model.atomics.size());
+        ImGui::Text("Objects: %zu", document->model.atomics.size());
 
         std::size_t vertexCount = 0;
         std::size_t triangleCount = 0;
@@ -507,7 +498,7 @@ void Application::DrawProperties()
         }
 
         ImGui::Text("Vertices: %zu", vertexCount);
-        ImGui::Text("Triangles: %zu", triangleCount);
+        ImGui::Text("Faces: %zu", triangleCount);
         ImGui::Text("Materials: %zu", materialCount);
 
         std::size_t resolvedTextures = 0;
@@ -531,7 +522,7 @@ void Application::DrawProperties()
         }
 
         ImGui::Text(
-            "Textures: %zu/%zu resolved",
+            "Textures found: %zu/%zu",
             resolvedTextures,
             textureReferences.size());
 
@@ -544,86 +535,59 @@ void Application::DrawProperties()
             document->model.sampCollisionValid;
 
         ImGui::PushID("collision-status");
-        if (document->collisionExportMode == CollisionExportMode::Remove)
-        {
-            DrawStatusMark(true);
-            ImGui::SameLine();
-            ImGui::TextUnformatted(
-                "Collision: normal and SA-MP plugins removed when exported");
-        }
-        else if (document->collisionExportMode ==
-                 CollisionExportMode::AttachOrReplace)
-        {
-            DrawStatusMark(document->hasCollision);
-            ImGui::SameLine();
-            ImGui::TextUnformatted(
-                document->hasCollision
-                    ? "Collision: SA-MP COL attached/replaced when exported"
-                    : "Collision: attach operation has no generated data");
-        }
-        else
-        {
-            DrawStatusMark(normalCollisionPassed || sampCollisionPassed);
-            ImGui::SameLine();
+        const bool collisionBroken =
+            (document->model.hasSampCollision ||
+             document->model.hasNormalCollision) &&
+            !normalCollisionPassed &&
+            !sampCollisionPassed;
 
-            if (normalCollisionPassed && sampCollisionPassed)
+        DrawStatusMark(!collisionBroken);
+        ImGui::SameLine();
+
+        if (document->model.hasSampCollision ||
+            document->model.hasNormalCollision)
+        {
+            if (!normalCollisionPassed && !sampCollisionPassed)
             {
-                ImGui::TextUnformatted(
-                    "Collision: normal and SA-MP plugins present");
-            }
-            else if (sampCollisionPassed)
-            {
-                ImGui::TextUnformatted("Collision: SA-MP COL present");
-            }
-            else if (normalCollisionPassed)
-            {
-                ImGui::TextUnformatted("Collision: normal COL present");
-            }
-            else if (document->model.hasSampCollision ||
-                     document->model.hasNormalCollision)
-            {
-                ImGui::TextUnformatted("Collision: present but invalid");
+                ImGui::TextUnformatted("Collision: Broken");
             }
             else
             {
-                ImGui::TextUnformatted("Collision: not attached");
+                ImGui::TextUnformatted("Collision: Attached");
             }
+        }
+        else if (document->hasCollision)
+        {
+            ImGui::TextUnformatted(
+                document->collision.mode == CollisionMode::Empty
+                    ? "Collision: Empty"
+                    : "Collision: Attached");
+        }
+        else
+        {
+            ImGui::TextUnformatted("Collision: None");
         }
         ImGui::PopID();
 
-        ImGui::Text(
-            "2DFX omni entries: %zu (%zu total effects)",
-            document->model.omniLightCount,
-            document->model.effect2dCount);
-        ImGui::Text(
-            "RW Light chunks: %zu actual, %zu declared",
-            document->model.renderWareLightCount,
-            document->model.declaredRenderWareLightCount);
+        ImGui::Text("Omni lights: %zu", document->model.omniLightCount);
 
         const bool lightSectionPassed =
             document->model.omniLightCount == 0 ||
             document->model.renderWareLightCount >=
                 document->model.omniLightCount;
-        ImGui::PushID("light-section-status");
-        DrawStatusMark(lightSectionPassed);
-        ImGui::SameLine();
-        ImGui::TextUnformatted(
-            lightSectionPassed
-                ? "Light chunks: structurally present"
-                : "Light chunks: missing or incomplete (repaired on export)");
-        ImGui::PopID();
 
-        if (document->model.trafficLightSignature)
+        if (document->model.omniLightCount != 0)
         {
-            ImGui::PushID("traffic-light-model-status");
-            DrawStatusMark(previewBuiltInTrafficModel);
+            ImGui::PushID("light-status");
+            DrawStatusMark(lightSectionPassed);
             ImGui::SameLine();
-            ImGui::TextWrapped(
-                previewBuiltInTrafficModel
-                    ? "Traffic-light preview: built-in GTA SA model-ID behavior"
-                    : "Traffic-light preview: custom AddSimpleModel ID; hardcoded cycling suppressed");
+            ImGui::TextUnformatted(
+                lightSectionPassed
+                    ? "Light data: OK"
+                    : "Light data: Missing");
             ImGui::PopID();
         }
+
     }
 
     ImGui::Spacing();
@@ -631,12 +595,19 @@ void Application::DrawProperties()
     ImGui::Separator();
 
     int mode = static_cast<int>(collisionMode);
-    ImGui::RadioButton("Empty", &mode, static_cast<int>(CollisionMode::Empty));
-    ImGui::RadioButton("Box", &mode, static_cast<int>(CollisionMode::Box));
-    ImGui::RadioButton("Mesh Faces", &mode, static_cast<int>(CollisionMode::MeshFaces));
+    ImGui::RadioButton(
+        "Empty",
+        &mode,
+        static_cast<int>(CollisionMode::Empty));
+    ImGui::RadioButton(
+        "Box",
+        &mode,
+        static_cast<int>(CollisionMode::Box));
+    ImGui::RadioButton(
+        "Model",
+        &mode,
+        static_cast<int>(CollisionMode::MeshFaces));
     collisionMode = static_cast<CollisionMode>(mode);
-
-    ImGui::Checkbox("Optimize", &optimizeCollision);
 
     if (document == nullptr)
     {
@@ -650,7 +621,6 @@ void Application::DrawProperties()
 
     const bool canDetachSelected =
         document != nullptr &&
-        document->collisionExportMode != CollisionExportMode::Remove &&
         (document->model.hasNormalCollision ||
          document->model.hasSampCollision ||
          document->hasCollision ||
@@ -674,8 +644,7 @@ void Application::DrawProperties()
 
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
     {
-        ImGui::SetTooltip(
-            "Remove embedded normal and SA-MP COL collision plugins on export");
+        ImGui::SetTooltip("Remove the collision now.");
     }
 
     if (documents.size() <= 1)
@@ -692,8 +661,7 @@ void Application::DrawProperties()
 
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
     {
-        ImGui::SetTooltip(
-            "Attach collision to DFF group");
+        ImGui::SetTooltip("Add collision to every DFF.");
     }
 
     if (ImGui::Button(
@@ -705,8 +673,7 @@ void Application::DrawProperties()
 
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
     {
-        ImGui::SetTooltip(
-            "Remove embedded normal and SA-MP COL collision plugins from every exported DFF in the group");
+        ImGui::SetTooltip("Remove collision from every DFF now.");
     }
 
     if (documents.size() <= 1)
@@ -745,8 +712,8 @@ void Application::DrawProperties()
 
     if (document != nullptr && document->hasCollision)
     {
-        ImGui::Text("COL vertices: %zu", document->collision.vertices.size());
-        ImGui::Text("COL faces: %zu", document->collision.faces.size());
+        ImGui::Text("Collision points: %zu", document->collision.vertices.size());
+        ImGui::Text("Collision faces: %zu", document->collision.faces.size());
     }
 
     ImGui::Spacing();
@@ -755,7 +722,7 @@ void Application::DrawProperties()
 
     if (txd.sourcePath.empty())
     {
-        ImGui::TextDisabled("No TXD loaded.");
+        ImGui::TextDisabled("No TXD open.");
     }
     else
     {
@@ -769,27 +736,27 @@ void Application::DrawProperties()
             ImGui::SameLine();
             if (!texture.decodeError.empty())
             {
-                ImGui::TextDisabled("[decode failed]");
+                ImGui::TextDisabled("[broken]");
             }
             else if (!texture.hasAlpha)
             {
-                ImGui::TextDisabled("[opaque]");
+                ImGui::TextDisabled("[no alpha]");
             }
             else if (texture.sampAlphaPreferred)
             {
-                ImGui::TextDisabled("[SA-MP alpha preferred]");
+                ImGui::TextDisabled("[alpha]");
             }
             else if (texture.sampPreviewUsesAlpha)
             {
-                ImGui::TextDisabled("[SA-MP alpha fallback]");
+                ImGui::TextDisabled("[alpha, large]");
             }
             else if (texture.sampAlphaExperimental)
             {
-                ImGui::TextDisabled("[DXT5 avoid; forced opaque]");
+                ImGui::TextDisabled("[DXT5, no alpha]");
             }
             else
             {
-                ImGui::TextDisabled("[alpha forced opaque]");
+                ImGui::TextDisabled("[no alpha]");
             }
 
             if (ImGui::IsItemHovered())
@@ -920,7 +887,6 @@ void Application::DrawViewport()
                 application->wireframe,
                 application->showCollision,
                 application->showEffects2D,
-                application->previewBuiltInTrafficModel,
                 application->showGrid,
                 application->txd.sourcePath.empty()
                     ? nullptr
@@ -962,8 +928,6 @@ void Application::Draw2DFXOverlay(
     const ModelDocument* document = SelectedDocument();
     if (!showEffects2D ||
         document == nullptr ||
-        (document->model.trafficLightSignature &&
-         !previewBuiltInTrafficModel) ||
         document->model.omniLightCount == 0 ||
         right - left <= 1.0f ||
         bottom - top <= 1.0f)
@@ -1090,7 +1054,7 @@ void Application::Draw2DFXOverlay(
             const float amount =
                 static_cast<float>(layer) / static_cast<float>(layers);
             const int alpha = static_cast<int>(
-                (5.0f + (1.0f - amount) * 18.0f) * savedAlpha);
+                (3.0f + (1.0f - amount) * 11.0f) * savedAlpha);
             drawList->AddCircleFilled(
                 center,
                 radius * amount,
@@ -1101,7 +1065,11 @@ void Application::Draw2DFXOverlay(
         drawList->AddCircleFilled(
             center,
             std::max(radius * 0.11f, 3.0f),
-            IM_COL32(255, 255, 255, 245),
+            IM_COL32(
+                255,
+                255,
+                255,
+                static_cast<int>(96.0f * savedAlpha)),
             32);
     }
 
@@ -1457,7 +1425,7 @@ void Application::LoadDffPaths(
     }
 
     std::ostringstream status;
-    status << "Loaded " << loadedCount << " DFF file";
+    status << "Opened " << loadedCount << " DFF file";
     if (loadedCount != 1)
     {
         status << "s";
@@ -1525,7 +1493,7 @@ void Application::LoadTxd(const std::filesystem::path& path)
 
     if (!txdReader.Load(path, loaded, error))
     {
-        SetStatus("TXD load failed: " + error);
+        SetStatus("Could not open TXD: " + error);
         return;
     }
 
@@ -1533,12 +1501,13 @@ void Application::LoadTxd(const std::filesystem::path& path)
     renderer.InvalidateTextures();
 
     std::ostringstream status;
-    status << "Loaded TXD " << path.filename().string()
-           << " with " << txd.textures.size() << " texture";
+    status << "Opened " << path.filename().string()
+           << " (" << txd.textures.size() << " texture";
     if (txd.textures.size() != 1)
     {
         status << "s";
     }
+    status << ").";
 
     SetStatus(status.str());
 }
@@ -1693,13 +1662,9 @@ void Application::FindAndLoadMatchingTxd(
     renderer.InvalidateTextures();
 
     std::ostringstream status;
-    status << "Auto-loaded TXD " << txd.sourcePath.filename().string()
-           << ": matched " << bestScore << " of "
-           << requiredNames.size() << " referenced texture";
-    if (requiredNames.size() != 1)
-    {
-        status << "s";
-    }
+    status << "Opened " << txd.sourcePath.filename().string()
+           << " (" << bestScore << " of "
+           << requiredNames.size() << " textures found).";
     SetStatus(status.str());
 }
 
@@ -1713,18 +1678,16 @@ void Application::AttachCollisionToSelected()
 
     document->collision = collisionBuilder.Build(
         document->model,
-        collisionMode,
-        optimizeCollision);
+        collisionMode);
 
     document->hasCollision = true;
+    document->collisionDetached = false;
     document->collisionExportMode = CollisionExportMode::AttachOrReplace;
 
-    std::ostringstream status;
-    status << "Attached collision to " << document->displayName
-           << ": " << document->collision.vertices.size() << " vertices, "
-           << document->collision.faces.size() << " faces.";
-
-    SetStatus(status.str());
+    SetStatus(
+        collisionMode == CollisionMode::Empty
+            ? "Empty collision added to " + document->displayName + "."
+            : "Collision attached to " + document->displayName + ".");
 }
 
 void Application::AttachCollisionToAll()
@@ -1733,16 +1696,18 @@ void Application::AttachCollisionToAll()
     {
         document->collision = collisionBuilder.Build(
             document->model,
-            collisionMode,
-            optimizeCollision);
+            collisionMode);
 
         document->hasCollision = true;
+        document->collisionDetached = false;
         document->collisionExportMode =
             CollisionExportMode::AttachOrReplace;
     }
 
     std::ostringstream status;
-    status << "Attached collision to all "
+    status << (collisionMode == CollisionMode::Empty
+                   ? "Empty collision added to "
+                   : "Collision attached to ")
            << documents.size()
            << " DFF files.";
     SetStatus(status.str());
@@ -1756,42 +1721,68 @@ void Application::DetachCollisionFromSelected()
         return;
     }
 
-    document->collision = {};
-    document->hasCollision = false;
-    document->collisionExportMode = CollisionExportMode::Remove;
+    bool detached = false;
+    std::string error;
 
-    SetStatus(
-        "Detached collision from " + document->displayName +
-        "; normal and SA-MP COL plugins will be removed on export.");
+    if (!dffExporter.DetachCollisionFromDocument(
+            *document,
+            detached,
+            error))
+    {
+        SetStatus(
+            "Could not remove collision from " +
+            document->displayName + ": " + error);
+        return;
+    }
+
+    if (!detached)
+    {
+        SetStatus(
+            document->displayName +
+            " has no collision.");
+        return;
+    }
+
+    SetStatus("Collision removed from " + document->displayName + ".");
 }
 
 void Application::DetachCollisionFromAll()
 {
     std::size_t detachedCount = 0;
+    std::size_t failureCount = 0;
+    std::ostringstream failures;
 
     for (std::unique_ptr<ModelDocument>& document : documents)
     {
-        const bool hadCollision =
-            document->model.hasNormalCollision ||
-            document->model.hasSampCollision ||
-            document->hasCollision ||
-            document->collisionExportMode ==
-                CollisionExportMode::AttachOrReplace;
+        bool detached = false;
+        std::string error;
 
-        document->collision = {};
-        document->hasCollision = false;
-        document->collisionExportMode = CollisionExportMode::Remove;
+        if (!dffExporter.DetachCollisionFromDocument(
+                *document,
+                detached,
+                error))
+        {
+            ++failureCount;
+            failures << document->displayName << ": " << error << "  ";
+            continue;
+        }
 
-        if (hadCollision)
+        if (detached)
         {
             ++detachedCount;
         }
     }
 
     std::ostringstream status;
-    status << "Marked " << detachedCount
-           << " of " << documents.size()
-           << " DFF files for collision removal on export.";
+    status << "Collision removed from "
+           << detachedCount << " of " << documents.size()
+           << " DFF files.";
+
+    if (failureCount != 0)
+    {
+        status << " Failed: " << failures.str();
+    }
+
     SetStatus(status.str());
 }
 
@@ -1824,17 +1815,17 @@ void Application::ExportSelectedDff()
         return;
     }
 
-    if (document->collisionExportMode == CollisionExportMode::Remove)
-    {
-        SetStatus(
-            "Exported DFF with embedded collision removed: " +
-            outputPath.string());
-    }
-    else if (document->collisionExportMode ==
+    if (document->collisionExportMode ==
              CollisionExportMode::AttachOrReplace)
     {
         SetStatus(
-            "Exported DFF with embedded SA-MP COL3: " +
+            "Exported DFF with collision: " +
+            outputPath.string());
+    }
+    else if (document->collisionDetached)
+    {
+        SetStatus(
+            "Exported DFF without collision: " +
             outputPath.string());
     }
     else

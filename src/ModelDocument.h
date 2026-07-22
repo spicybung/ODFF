@@ -11,8 +11,7 @@
 enum class CollisionExportMode
 {
     PreserveSource,
-    AttachOrReplace,
-    Remove
+    AttachOrReplace
 };
 
 struct ModelDocument
@@ -23,6 +22,7 @@ struct ModelDocument
     ModelData model;
     CollisionData collision;
     bool hasCollision = false;
+    bool collisionDetached = false;
     CollisionExportMode collisionExportMode =
         CollisionExportMode::PreserveSource;
 };

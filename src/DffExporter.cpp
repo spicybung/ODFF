@@ -60,6 +60,70 @@ bool DffExporter::ExportDocument(
     return true;
 }
 
+
+bool DffExporter::DetachCollisionFromDocument(
+    ModelDocument& document,
+    bool& detached,
+    std::string& error) const
+{
+    detached = false;
+
+    if (document.sourceBytes.empty())
+    {
+        error = "The DFF data is missing.";
+        return false;
+    }
+
+    const bool hadGeneratedCollision =
+        document.hasCollision ||
+        document.collisionExportMode == CollisionExportMode::AttachOrReplace;
+
+    const bool readerReportedCollision =
+        document.model.hasNormalCollision ||
+        document.model.hasSampCollision;
+
+    std::vector<std::uint8_t> detachedBytes = document.sourceBytes;
+    bool removedEmbeddedCollision = false;
+
+    if (!RemoveEmbeddedCollision(
+            detachedBytes,
+            removedEmbeddedCollision,
+            error))
+    {
+        return false;
+    }
+
+    if (readerReportedCollision && !removedEmbeddedCollision)
+    {
+        error =
+            "ODFF found collision but could not remove it.";
+        return false;
+    }
+
+    detached =
+        removedEmbeddedCollision ||
+        hadGeneratedCollision ||
+        readerReportedCollision;
+
+    if (!detached)
+    {
+        return true;
+    }
+
+    document.sourceBytes = std::move(detachedBytes);
+    document.collision = {};
+    document.hasCollision = false;
+    document.collisionDetached = true;
+    document.collisionExportMode = CollisionExportMode::PreserveSource;
+
+    document.model.hasNormalCollision = false;
+    document.model.normalCollisionValid = false;
+    document.model.hasSampCollision = false;
+    document.model.sampCollisionValid = false;
+
+    return true;
+}
+
 bool DffExporter::BuildExportBytes(
     const ModelDocument& document,
     std::vector<std::uint8_t>& output,
@@ -67,7 +131,7 @@ bool DffExporter::BuildExportBytes(
 {
     if (document.sourceBytes.empty())
     {
-        error = "The original DFF bytes were not retained when the file was loaded.";
+        error = "The DFF data is missing.";
         return false;
     }
 
@@ -78,11 +142,6 @@ bool DffExporter::BuildExportBytes(
         return false;
     }
 
-    if (document.collisionExportMode == CollisionExportMode::Remove)
-    {
-        return RemoveEmbeddedCollision(output, error);
-    }
-
     if (document.collisionExportMode ==
         CollisionExportMode::PreserveSource)
     {
@@ -91,7 +150,7 @@ bool DffExporter::BuildExportBytes(
 
     if (!document.hasCollision)
     {
-        error = "Collision attach/replace was requested without generated collision data.";
+        error = "No collision was made.";
         return false;
     }
 
@@ -424,8 +483,10 @@ bool DffExporter::EnsureRenderWareLights(
 }
 bool DffExporter::RemoveEmbeddedCollision(
     std::vector<std::uint8_t>& dffBytes,
+    bool& removedCollision,
     std::string& error) const
 {
+    removedCollision = false;
     ChunkLocation clump{};
 
     if (!ReadChunk(dffBytes, 0, dffBytes.size(), clump) ||
@@ -544,6 +605,8 @@ bool DffExporter::RemoveEmbeddedCollision(
         return true;
     }
 
+    removedCollision = true;
+
     const std::vector<std::uint8_t> rebuiltClump =
         BuildChunk(ChunkClump, clump.version, clumpPayload);
 
@@ -577,7 +640,11 @@ bool DffExporter::EmbedSampCollision(
     const std::vector<std::uint8_t>& col3Bytes,
     std::string& error) const
 {
-    if (!RemoveEmbeddedCollision(dffBytes, error))
+    bool removedExistingCollision = false;
+    if (!RemoveEmbeddedCollision(
+            dffBytes,
+            removedExistingCollision,
+            error))
     {
         return false;
     }
