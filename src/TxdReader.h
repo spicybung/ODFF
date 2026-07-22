@@ -28,6 +28,11 @@ struct TxdTextureInfo
     std::uint32_t filterAddressing = 0;
     std::vector<TxdMipLevel> mipLevels;
     bool hasAlpha = false;
+    bool sampAlphaCompatible = false;
+    bool sampAlphaPreferred = false;
+    bool sampAlphaExperimental = false;
+    bool sampPreviewUsesAlpha = false;
+    std::string sampCompatibility;
     std::string decodeError;
 };
 

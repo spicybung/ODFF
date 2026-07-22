@@ -777,6 +777,74 @@ bool TxdReader::Load(const std::filesystem::path& path, TxdData& txd, std::strin
                 levelHeight = std::max<std::uint16_t>(1, levelHeight / 2);
             }
 
+            const bool d3dNative =
+                info.platformId == 8 || info.platformId == 9;
+
+            const bool nonPaletted =
+                (info.rasterFormat & (RasterFormatPal8 | RasterFormatPal4)) == 0;
+
+            const bool preferredDxt3Alpha =
+                d3dNative &&
+                nonPaletted &&
+                info.d3dFormat == D3dFormatDxt3;
+
+            const bool experimentalDxt5Alpha =
+                d3dNative &&
+                nonPaletted &&
+                info.d3dFormat == D3dFormatDxt5;
+
+            const bool fallbackUncompressedAlpha =
+                d3dNative &&
+                nonPaletted &&
+                info.d3dFormat == D3dFormatA8R8G8B8 &&
+                info.depth == 32 &&
+                info.compression == 0;
+
+            info.sampAlphaPreferred =
+                info.hasAlpha && preferredDxt3Alpha;
+
+            info.sampAlphaExperimental =
+                info.hasAlpha && experimentalDxt5Alpha;
+
+            info.sampAlphaCompatible =
+                !info.hasAlpha ||
+                preferredDxt3Alpha ||
+                fallbackUncompressedAlpha;
+
+            info.sampPreviewUsesAlpha =
+                info.hasAlpha && info.sampAlphaCompatible;
+
+            if (!info.decodeError.empty())
+            {
+                info.sampCompatibility =
+                    "SA-MP/open.mp preview unavailable because decoding failed.";
+            }
+            else if (!info.hasAlpha)
+            {
+                info.sampCompatibility =
+                    "SA-MP/open.mp: opaque texture.";
+            }
+            else if (preferredDxt3Alpha)
+            {
+                info.sampCompatibility =
+                    "SA-MP/open.mp preferred alpha: DXT3 compressed alpha.";
+            }
+            else if (experimentalDxt5Alpha)
+            {
+                info.sampCompatibility =
+                    "SA-MP/open.mp: DXT5 alpha is unverified/avoid based on current in-game testing; preview forced opaque. Base dimensions alone do not establish compatibility.";
+            }
+            else if (fallbackUncompressedAlpha)
+            {
+                info.sampCompatibility =
+                    "SA-MP/open.mp accepted fallback alpha: uncompressed 32-bit A8R8G8B8; larger than DXT3.";
+            }
+            else
+            {
+                info.sampCompatibility =
+                    "SA-MP/open.mp alpha is not covered by the verified DXT3 or A8R8G8B8 rules; preview forced opaque.";
+            }
+
             txd.textures.push_back(std::move(info));
             offset = chunkEnd;
         }

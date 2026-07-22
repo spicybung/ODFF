@@ -185,6 +185,7 @@ void OpenGLRenderer::Render(
     bool wireframe,
     bool showCollision,
     bool showEffects2D,
+    bool previewBuiltInTrafficModel,
     bool showGrid,
     const TxdData* textureDictionary) const
 {
@@ -273,7 +274,9 @@ void OpenGLRenderer::Render(
 
         if (showEffects2D)
         {
-            DrawEffects2D(document->model);
+            DrawEffects2D(
+                document->model,
+                previewBuiltInTrafficModel);
         }
 
     }
@@ -285,8 +288,14 @@ void OpenGLRenderer::Render(
     glDisable(GL_DEPTH_TEST);
 }
 
-void OpenGLRenderer::DrawEffects2D(const ModelData& model) const
+void OpenGLRenderer::DrawEffects2D(
+    const ModelData& model,
+    bool previewBuiltInTrafficModel) const
 {
+    if (model.trafficLightSignature && !previewBuiltInTrafficModel)
+    {
+        return;
+    }
     std::vector<WorldLight> lights;
     lights.reserve(model.omniLightCount);
 
@@ -674,7 +683,7 @@ const OpenGLRenderer::UploadedTexture* OpenGLRenderer::UploadTexture(
     }
 
     UploadedTexture uploaded{};
-    uploaded.hasAlpha = texture.hasAlpha;
+    uploaded.hasAlpha = texture.sampPreviewUsesAlpha;
     glGenTextures(1, &uploaded.id);
     if (uploaded.id == 0)
     {
@@ -689,6 +698,21 @@ const OpenGLRenderer::UploadedTexture* OpenGLRenderer::UploadTexture(
          ++levelIndex)
     {
         const TxdMipLevel& mip = texture.mipLevels[levelIndex];
+        const std::uint8_t* pixelData = mip.rgbaPixels.data();
+        std::vector<std::uint8_t> forcedOpaquePixels;
+
+        if (texture.hasAlpha && !texture.sampPreviewUsesAlpha)
+        {
+            forcedOpaquePixels = mip.rgbaPixels;
+            for (std::size_t alphaOffset = 3;
+                 alphaOffset < forcedOpaquePixels.size();
+                 alphaOffset += 4)
+            {
+                forcedOpaquePixels[alphaOffset] = 255;
+            }
+            pixelData = forcedOpaquePixels.data();
+        }
+
         glTexImage2D(
             GL_TEXTURE_2D,
             static_cast<GLint>(levelIndex),
@@ -698,7 +722,7 @@ const OpenGLRenderer::UploadedTexture* OpenGLRenderer::UploadTexture(
             0,
             GL_RGBA,
             GL_UNSIGNED_BYTE,
-            mip.rgbaPixels.data());
+            pixelData);
     }
 
     const std::uint32_t filterMode = texture.filterAddressing & 0xFF;
@@ -741,9 +765,54 @@ void OpenGLRenderer::DrawMaterialTriangles(
     const UploadedTexture* texture) const
 {
     const bool hasTexture = texture != nullptr && texture->id != 0;
+
+    auto triangleUsesRequestedMaterial = [&](const Triangle& triangle)
+    {
+        const bool unassignedMaterial =
+            triangle.materialIndex >= geometry.materials.size();
+
+        if (materialIndex == std::numeric_limits<std::uint16_t>::max())
+        {
+            return unassignedMaterial;
+        }
+
+        return triangle.materialIndex == materialIndex;
+    };
+
+    bool hasVertexAlpha = false;
+    for (const Triangle& triangle : geometry.triangles)
+    {
+        if (!triangleUsesRequestedMaterial(triangle))
+        {
+            continue;
+        }
+
+        const std::uint32_t indices[3] = {
+            triangle.a,
+            triangle.b,
+            triangle.c
+        };
+
+        for (const std::uint32_t index : indices)
+        {
+            if (index < geometry.colors.size() &&
+                geometry.colors[index].a < 255)
+            {
+                hasVertexAlpha = true;
+                break;
+            }
+        }
+
+        if (hasVertexAlpha)
+        {
+            break;
+        }
+    }
+
     const bool transparent =
         (hasTexture && texture->hasAlpha) ||
-        (material != nullptr && material->color.a < 255);
+        (material != nullptr && material->color.a < 255) ||
+        hasVertexAlpha;
 
     if (hasTexture)
     {
@@ -754,6 +823,16 @@ void OpenGLRenderer::DrawMaterialTriangles(
     else
     {
         glDisable(GL_TEXTURE_2D);
+    }
+
+    if (hasTexture && texture->hasAlpha)
+    {
+        glEnable(GL_ALPHA_TEST);
+        glAlphaFunc(GL_GREATER, 1.0f / 255.0f);
+    }
+    else
+    {
+        glDisable(GL_ALPHA_TEST);
     }
 
     if (transparent)
@@ -768,21 +847,17 @@ void OpenGLRenderer::DrawMaterialTriangles(
         glDepthMask(GL_TRUE);
     }
 
+    auto multiplyChannel = [](std::uint8_t left, std::uint8_t right)
+    {
+        return static_cast<std::uint8_t>(
+            (static_cast<unsigned int>(left) * right + 127) / 255);
+    };
+
     glBegin(GL_TRIANGLES);
 
     for (const Triangle& triangle : geometry.triangles)
     {
-        const bool unassignedMaterial =
-            triangle.materialIndex >= geometry.materials.size();
-
-        if (materialIndex == std::numeric_limits<std::uint16_t>::max())
-        {
-            if (!unassignedMaterial)
-            {
-                continue;
-            }
-        }
-        else if (triangle.materialIndex != materialIndex)
+        if (!triangleUsesRequestedMaterial(triangle))
         {
             continue;
         }
@@ -804,18 +879,17 @@ void OpenGLRenderer::DrawMaterialTriangles(
         {
             Color4 color{255, 255, 255, 255};
 
-            if (!hasTexture && index < geometry.colors.size())
+            if (index < geometry.colors.size())
             {
                 color = geometry.colors[index];
             }
-            else if (!hasTexture && material != nullptr)
-            {
-                color = material->color;
-            }
 
-            if (hasTexture && material != nullptr)
+            if (material != nullptr)
             {
-                color.a = material->color.a;
+                color.r = multiplyChannel(color.r, material->color.r);
+                color.g = multiplyChannel(color.g, material->color.g);
+                color.b = multiplyChannel(color.b, material->color.b);
+                color.a = multiplyChannel(color.a, material->color.a);
             }
 
             glColor4ub(
@@ -826,13 +900,8 @@ void OpenGLRenderer::DrawMaterialTriangles(
 
             if (index < geometry.normals.size())
             {
-                const Vec3& normal =
-                    geometry.normals[index];
-
-                glNormal3f(
-                    normal.x,
-                    normal.y,
-                    normal.z);
+                const Vec3& normal = geometry.normals[index];
+                glNormal3f(normal.x, normal.y, normal.z);
             }
 
             if (hasTexture && index < geometry.texCoords.size())
@@ -841,17 +910,13 @@ void OpenGLRenderer::DrawMaterialTriangles(
                 glTexCoord2f(texCoord.x, texCoord.y);
             }
 
-            const Vec3& vertex =
-                geometry.vertices[index];
-
-            glVertex3f(
-                vertex.x,
-                vertex.y,
-                vertex.z);
+            const Vec3& vertex = geometry.vertices[index];
+            glVertex3f(vertex.x, vertex.y, vertex.z);
         }
     }
 
     glEnd();
+    glDisable(GL_ALPHA_TEST);
 }
 
 void OpenGLRenderer::InvalidateTextures()

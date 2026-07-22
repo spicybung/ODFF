@@ -37,6 +37,7 @@ struct Effect2D
 struct Geometry
 {
     std::string name;
+    std::uint16_t flags = 0;
     std::vector<Vec3> vertices;
     std::vector<Vec3> normals;
     std::vector<Vec2> texCoords;
@@ -69,8 +70,13 @@ struct ModelData
     std::vector<Atomic> atomics;
     Bounds bounds;
     std::uint32_t renderWareVersion = 0;
+    bool hasNormalCollision = false;
+    bool normalCollisionValid = false;
     bool hasSampCollision = false;
     bool sampCollisionValid = false;
     std::size_t effect2dCount = 0;
     std::size_t omniLightCount = 0;
+    std::size_t declaredRenderWareLightCount = 0;
+    std::size_t renderWareLightCount = 0;
+    bool trafficLightSignature = false;
 };

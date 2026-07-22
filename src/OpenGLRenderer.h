@@ -21,6 +21,7 @@ public:
         bool wireframe,
         bool showCollision,
         bool showEffects2D,
+        bool previewBuiltInTrafficModel,
         bool showGrid,
         const TxdData* textureDictionary) const;
 
@@ -77,7 +78,9 @@ private:
     void DrawFlatCollision(
         const CollisionData& collision) const;
 
-    void DrawEffects2D(const ModelData& model) const;
+    void DrawEffects2D(
+        const ModelData& model,
+        bool previewBuiltInTrafficModel) const;
     void CollectGeometryLights(
         const Geometry& geometry,
         const Mat4& transform,

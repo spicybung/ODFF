@@ -8,6 +8,13 @@
 #include <string>
 #include <vector>
 
+enum class CollisionExportMode
+{
+    PreserveSource,
+    AttachOrReplace,
+    Remove
+};
+
 struct ModelDocument
 {
     std::filesystem::path sourcePath;
@@ -16,4 +23,6 @@ struct ModelDocument
     ModelData model;
     CollisionData collision;
     bool hasCollision = false;
+    CollisionExportMode collisionExportMode =
+        CollisionExportMode::PreserveSource;
 };

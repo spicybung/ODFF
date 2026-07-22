@@ -56,6 +56,8 @@ private:
 
     void AttachCollisionToSelected();
     void AttachCollisionToAll();
+    void DetachCollisionFromSelected();
+    void DetachCollisionFromAll();
     void ExportSelectedDff();
     void ExportDffGroup();
 
@@ -96,6 +98,7 @@ private:
     bool wireframe = false;
     bool showCollision = true;
     bool showEffects2D = true;
+    bool previewBuiltInTrafficModel = false;
     bool showGrid = true;
 
     bool viewportHovered = false;

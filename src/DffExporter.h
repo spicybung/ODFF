@@ -32,9 +32,18 @@ private:
         std::vector<std::uint8_t>& output,
         std::string& error) const;
 
+    bool RemoveEmbeddedCollision(
+        std::vector<std::uint8_t>& dffBytes,
+        std::string& error) const;
+
     bool EmbedSampCollision(
         std::vector<std::uint8_t>& dffBytes,
         const std::vector<std::uint8_t>& col3Bytes,
+        std::string& error) const;
+
+    bool EnsureRenderWareLights(
+        std::vector<std::uint8_t>& dffBytes,
+        const ModelData& model,
         std::string& error) const;
 
     std::vector<std::uint8_t> BuildSampCol3(
@@ -59,6 +68,16 @@ private:
         std::vector<std::uint8_t>& bytes,
         std::size_t offset,
         std::uint32_t value);
+
+    static void WriteU16(
+        std::vector<std::uint8_t>& bytes,
+        std::size_t offset,
+        std::uint16_t value);
+
+    static void WriteF32(
+        std::vector<std::uint8_t>& bytes,
+        std::size_t offset,
+        float value);
 
     static void AppendU8(
         std::vector<std::uint8_t>& bytes,

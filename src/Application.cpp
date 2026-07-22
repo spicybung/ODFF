@@ -235,7 +235,7 @@ bool Application::Initialize()
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
 
-    window = glfwCreateWindow(1280, 820, "ODFF v0.2.0", nullptr, nullptr);
+    window = glfwCreateWindow(1280, 820, "ODFF v0.2.2", nullptr, nullptr);
     if (window == nullptr)
     {
         glfwTerminate();
@@ -398,6 +398,14 @@ void Application::DrawToolbar()
     ImGui::SameLine();
     ImGui::Checkbox("2DFX lights", &showEffects2D);
     ImGui::SameLine();
+    ImGui::Checkbox("Built-in traffic ID", &previewBuiltInTrafficModel);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+    {
+        ImGui::SetTooltip(
+            "Enable GTA SA's built-in traffic-light behavior in the preview.\n"
+            "Leave this off to preview a negative AddSimpleModel ID.");
+    }
+    ImGui::SameLine();
     ImGui::Checkbox("Grid", &showGrid);
 
     ImGui::SameLine();
@@ -410,7 +418,7 @@ void Application::DrawToolbar()
             "A program for embedding SAMP collision in DFFs\n\n"
             "https://github.com/spicybung\n\n"
             "Reigns Studios\n\n"
-            "v 0.2.0 2026",
+            "v 0.2.2 2026",
             "About ODFF",
             MB_OK | MB_ICONINFORMATION);
 #endif
@@ -427,9 +435,20 @@ void Application::DrawModelList()
         const bool selected = index == selectedIndex;
 
         ImGui::PushID(static_cast<int>(index));
-        DrawStatusMark(
-            documents[index]->model.hasSampCollision &&
-            documents[index]->model.sampCollisionValid);
+        const bool sourceCollisionValid =
+            (documents[index]->model.hasNormalCollision &&
+             documents[index]->model.normalCollisionValid) ||
+            (documents[index]->model.hasSampCollision &&
+             documents[index]->model.sampCollisionValid);
+
+        const bool collisionStateAccepted =
+            documents[index]->collisionExportMode ==
+                CollisionExportMode::Remove ||
+            documents[index]->collisionExportMode ==
+                CollisionExportMode::AttachOrReplace ||
+            sourceCollisionValid;
+
+        DrawStatusMark(collisionStateAccepted);
         ImGui::SameLine();
 
         if (ImGui::Selectable(documents[index]->displayName.c_str(), selected))
@@ -516,27 +535,99 @@ void Application::DrawProperties()
             resolvedTextures,
             textureReferences.size());
 
-        const bool collisionPassed =
+        const bool normalCollisionPassed =
+            document->model.hasNormalCollision &&
+            document->model.normalCollisionValid;
+
+        const bool sampCollisionPassed =
             document->model.hasSampCollision &&
             document->model.sampCollisionValid;
 
         ImGui::PushID("collision-status");
-        DrawStatusMark(collisionPassed);
-        ImGui::SameLine();
-        ImGui::TextUnformatted(
-            collisionPassed
-                ? "SAMP Collision: passing"
-                : "SAMP Collision: failing");
+        if (document->collisionExportMode == CollisionExportMode::Remove)
+        {
+            DrawStatusMark(true);
+            ImGui::SameLine();
+            ImGui::TextUnformatted(
+                "Collision: normal and SA-MP plugins removed when exported");
+        }
+        else if (document->collisionExportMode ==
+                 CollisionExportMode::AttachOrReplace)
+        {
+            DrawStatusMark(document->hasCollision);
+            ImGui::SameLine();
+            ImGui::TextUnformatted(
+                document->hasCollision
+                    ? "Collision: SA-MP COL attached/replaced when exported"
+                    : "Collision: attach operation has no generated data");
+        }
+        else
+        {
+            DrawStatusMark(normalCollisionPassed || sampCollisionPassed);
+            ImGui::SameLine();
+
+            if (normalCollisionPassed && sampCollisionPassed)
+            {
+                ImGui::TextUnformatted(
+                    "Collision: normal and SA-MP plugins present");
+            }
+            else if (sampCollisionPassed)
+            {
+                ImGui::TextUnformatted("Collision: SA-MP COL present");
+            }
+            else if (normalCollisionPassed)
+            {
+                ImGui::TextUnformatted("Collision: normal COL present");
+            }
+            else if (document->model.hasSampCollision ||
+                     document->model.hasNormalCollision)
+            {
+                ImGui::TextUnformatted("Collision: present but invalid");
+            }
+            else
+            {
+                ImGui::TextUnformatted("Collision: not attached");
+            }
+        }
         ImGui::PopID();
 
         ImGui::Text(
-            "2DFX lights: %zu working (%zu total effects)",
+            "2DFX omni entries: %zu (%zu total effects)",
             document->model.omniLightCount,
             document->model.effect2dCount);
+        ImGui::Text(
+            "RW Light chunks: %zu actual, %zu declared",
+            document->model.renderWareLightCount,
+            document->model.declaredRenderWareLightCount);
+
+        const bool lightSectionPassed =
+            document->model.omniLightCount == 0 ||
+            document->model.renderWareLightCount >=
+                document->model.omniLightCount;
+        ImGui::PushID("light-section-status");
+        DrawStatusMark(lightSectionPassed);
+        ImGui::SameLine();
+        ImGui::TextUnformatted(
+            lightSectionPassed
+                ? "Light chunks: structurally present"
+                : "Light chunks: missing or incomplete (repaired on export)");
+        ImGui::PopID();
+
+        if (document->model.trafficLightSignature)
+        {
+            ImGui::PushID("traffic-light-model-status");
+            DrawStatusMark(previewBuiltInTrafficModel);
+            ImGui::SameLine();
+            ImGui::TextWrapped(
+                previewBuiltInTrafficModel
+                    ? "Traffic-light preview: built-in GTA SA model-ID behavior"
+                    : "Traffic-light preview: custom AddSimpleModel ID; hardcoded cycling suppressed");
+            ImGui::PopID();
+        }
     }
 
     ImGui::Spacing();
-    ImGui::TextUnformatted("Make Collision");
+    ImGui::TextUnformatted("Collision");
     ImGui::Separator();
 
     int mode = static_cast<int>(collisionMode);
@@ -557,6 +648,36 @@ void Application::DrawProperties()
         AttachCollisionToSelected();
     }
 
+    const bool canDetachSelected =
+        document != nullptr &&
+        document->collisionExportMode != CollisionExportMode::Remove &&
+        (document->model.hasNormalCollision ||
+         document->model.hasSampCollision ||
+         document->hasCollision ||
+         document->collisionExportMode ==
+             CollisionExportMode::AttachOrReplace);
+
+    if (!canDetachSelected)
+    {
+        ImGui::BeginDisabled();
+    }
+
+    if (ImGui::Button("Detach Collision", ImVec2(-1.0f, 0.0f)))
+    {
+        DetachCollisionFromSelected();
+    }
+
+    if (!canDetachSelected)
+    {
+        ImGui::EndDisabled();
+    }
+
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+    {
+        ImGui::SetTooltip(
+            "Remove embedded normal and SA-MP COL collision plugins on export");
+    }
+
     if (documents.size() <= 1)
     {
         ImGui::BeginDisabled();
@@ -573,6 +694,19 @@ void Application::DrawProperties()
     {
         ImGui::SetTooltip(
             "Attach collision to DFF group");
+    }
+
+    if (ImGui::Button(
+            "Detach Collision from All",
+            ImVec2(-1.0f, 0.0f)))
+    {
+        DetachCollisionFromAll();
+    }
+
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+    {
+        ImGui::SetTooltip(
+            "Remove embedded normal and SA-MP COL collision plugins from every exported DFF in the group");
     }
 
     if (documents.size() <= 1)
@@ -632,17 +766,30 @@ void Application::DrawProperties()
         for (const TxdTextureInfo& texture : txd.textures)
         {
             ImGui::Text("%s", texture.name.empty() ? "<unnamed>" : texture.name.c_str());
+            ImGui::SameLine();
             if (!texture.decodeError.empty())
             {
-                ImGui::SameLine();
                 ImGui::TextDisabled("[decode failed]");
+            }
+            else if (!texture.hasAlpha)
+            {
+                ImGui::TextDisabled("[opaque]");
+            }
+            else if (texture.sampAlphaPreferred)
+            {
+                ImGui::TextDisabled("[SA-MP alpha preferred]");
+            }
+            else if (texture.sampPreviewUsesAlpha)
+            {
+                ImGui::TextDisabled("[SA-MP alpha fallback]");
+            }
+            else if (texture.sampAlphaExperimental)
+            {
+                ImGui::TextDisabled("[DXT5 avoid; forced opaque]");
             }
             else
             {
-                ImGui::SameLine();
-                ImGui::TextDisabled("[%zu mip%s decoded]",
-                    texture.mipLevels.size(),
-                    texture.mipLevels.size() == 1 ? "" : "s");
+                ImGui::TextDisabled("[alpha forced opaque]");
             }
 
             if (ImGui::IsItemHovered())
@@ -650,17 +797,21 @@ void Application::DrawProperties()
                 if (texture.decodeError.empty())
                 {
                     ImGui::SetTooltip(
-                        "%ux%u, %u-bit, %u mipmaps, platform %u%s",
+                        "%ux%u, %u-bit, %u mipmaps, platform %u%s\n%s",
                         texture.width,
                         texture.height,
                         texture.depth,
                         texture.mipmapCount,
                         texture.platformId,
-                        texture.hasAlpha ? ", alpha" : "");
+                        texture.hasAlpha ? ", decoded alpha" : "",
+                        texture.sampCompatibility.c_str());
                 }
                 else
                 {
-                    ImGui::SetTooltip("%s", texture.decodeError.c_str());
+                    ImGui::SetTooltip(
+                        "%s\n%s",
+                        texture.decodeError.c_str(),
+                        texture.sampCompatibility.c_str());
                 }
             }
         }
@@ -769,6 +920,7 @@ void Application::DrawViewport()
                 application->wireframe,
                 application->showCollision,
                 application->showEffects2D,
+                application->previewBuiltInTrafficModel,
                 application->showGrid,
                 application->txd.sourcePath.empty()
                     ? nullptr
@@ -810,6 +962,8 @@ void Application::Draw2DFXOverlay(
     const ModelDocument* document = SelectedDocument();
     if (!showEffects2D ||
         document == nullptr ||
+        (document->model.trafficLightSignature &&
+         !previewBuiltInTrafficModel) ||
         document->model.omniLightCount == 0 ||
         right - left <= 1.0f ||
         bottom - top <= 1.0f)
@@ -1563,6 +1717,7 @@ void Application::AttachCollisionToSelected()
         optimizeCollision);
 
     document->hasCollision = true;
+    document->collisionExportMode = CollisionExportMode::AttachOrReplace;
 
     std::ostringstream status;
     status << "Attached collision to " << document->displayName
@@ -1582,12 +1737,61 @@ void Application::AttachCollisionToAll()
             optimizeCollision);
 
         document->hasCollision = true;
+        document->collisionExportMode =
+            CollisionExportMode::AttachOrReplace;
     }
 
     std::ostringstream status;
     status << "Attached collision to all "
            << documents.size()
            << " DFF files.";
+    SetStatus(status.str());
+}
+
+void Application::DetachCollisionFromSelected()
+{
+    ModelDocument* document = SelectedDocument();
+    if (document == nullptr)
+    {
+        return;
+    }
+
+    document->collision = {};
+    document->hasCollision = false;
+    document->collisionExportMode = CollisionExportMode::Remove;
+
+    SetStatus(
+        "Detached collision from " + document->displayName +
+        "; normal and SA-MP COL plugins will be removed on export.");
+}
+
+void Application::DetachCollisionFromAll()
+{
+    std::size_t detachedCount = 0;
+
+    for (std::unique_ptr<ModelDocument>& document : documents)
+    {
+        const bool hadCollision =
+            document->model.hasNormalCollision ||
+            document->model.hasSampCollision ||
+            document->hasCollision ||
+            document->collisionExportMode ==
+                CollisionExportMode::AttachOrReplace;
+
+        document->collision = {};
+        document->hasCollision = false;
+        document->collisionExportMode = CollisionExportMode::Remove;
+
+        if (hadCollision)
+        {
+            ++detachedCount;
+        }
+    }
+
+    std::ostringstream status;
+    status << "Marked " << detachedCount
+           << " of " << documents.size()
+           << " DFF files for collision removal on export.";
     SetStatus(status.str());
 }
 
@@ -1620,7 +1824,14 @@ void Application::ExportSelectedDff()
         return;
     }
 
-    if (document->hasCollision)
+    if (document->collisionExportMode == CollisionExportMode::Remove)
+    {
+        SetStatus(
+            "Exported DFF with embedded collision removed: " +
+            outputPath.string());
+    }
+    else if (document->collisionExportMode ==
+             CollisionExportMode::AttachOrReplace)
     {
         SetStatus(
             "Exported DFF with embedded SA-MP COL3: " +

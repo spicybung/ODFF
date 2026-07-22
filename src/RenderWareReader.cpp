@@ -1,5 +1,7 @@
 #include "RenderWareReader.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -17,10 +19,12 @@ namespace
     constexpr std::uint32_t ChunkFrameList = 0x0000000E;
     constexpr std::uint32_t ChunkGeometry = 0x0000000F;
     constexpr std::uint32_t ChunkClump = 0x00000010;
+    constexpr std::uint32_t ChunkLight = 0x00000012;
     constexpr std::uint32_t ChunkAtomic = 0x00000014;
     constexpr std::uint32_t ChunkGeometryList = 0x0000001A;
     constexpr std::uint32_t PluginFrameName = 0x0253F2FE;
     constexpr std::uint32_t Plugin2DFX = 0x0253F2F8;
+    constexpr std::uint32_t PluginNormalCollision = 0x0253F2FA;
     constexpr std::uint32_t PluginSampCollision = 0x0253F2FF;
 
     constexpr std::uint16_t GeometryFlagTextured = 0x0004;
@@ -28,6 +32,74 @@ namespace
     constexpr std::uint16_t GeometryFlagNormals = 0x0010;
     constexpr std::uint16_t GeometryFlagTextured2 = 0x0080;
     constexpr std::uint16_t GeometryFlagNative = 0x0100;
+
+    std::string NormalizeName(std::string value)
+    {
+        std::transform(
+            value.begin(),
+            value.end(),
+            value.begin(),
+            [](unsigned char character)
+            {
+                return static_cast<char>(std::tolower(character));
+            });
+        return value;
+    }
+
+    bool IsTrafficLightSignature(const ModelData& model)
+    {
+        if (model.omniLightCount != 6 ||
+            model.effect2dCount != 6)
+        {
+            return false;
+        }
+
+        std::size_t redCount = 0;
+        std::size_t amberCount = 0;
+        std::size_t greenCount = 0;
+        bool hasTrafficTexture = false;
+
+        for (const Geometry& geometry : model.geometries)
+        {
+            for (const MaterialInfo& material : geometry.materials)
+            {
+                const std::string textureName = NormalizeName(material.textureName);
+                if (textureName.find("traffic") != std::string::npos ||
+                    textureName.find("taffic") != std::string::npos)
+                {
+                    hasTrafficTexture = true;
+                }
+            }
+
+            for (const Effect2D& effect : geometry.effects2d)
+            {
+                if (effect.type != 0)
+                {
+                    continue;
+                }
+
+                const Color4& color = effect.color;
+                if (color.r >= 200 && color.g <= 64 && color.b <= 64)
+                {
+                    ++redCount;
+                }
+                else if (color.r >= 200 && color.g >= 80 && color.g <= 200 && color.b <= 64)
+                {
+                    ++amberCount;
+                }
+                else if (color.g >= 200 && color.r <= 64 && color.b <= 64)
+                {
+                    ++greenCount;
+                }
+            }
+        }
+
+        return
+            hasTrafficTexture &&
+            redCount == 2 &&
+            amberCount == 2 &&
+            greenCount == 2;
+    }
 }
 
 RenderWareReader::BinaryReader::BinaryReader(std::vector<std::uint8_t> bytes)
@@ -190,6 +262,8 @@ bool RenderWareReader::LoadDff(const std::filesystem::path& path, ModelData& mod
                 }));
         }
 
+        model.trafficLightSignature = IsTrafficLightSignature(model);
+
         BuildWorldTransforms(model);
         BuildBounds(model);
         return true;
@@ -276,6 +350,11 @@ bool RenderWareReader::ParseClump(
     }
 
     const std::uint32_t atomicCount = reader.ReadU32();
+    if (clumpStruct.endOffset - reader.Position() >= 8)
+    {
+        model.declaredRenderWareLightCount = reader.ReadU32();
+        reader.ReadU32();
+    }
     reader.Seek(clumpStruct.endOffset);
 
     while (reader.Position() + 12 <= clump.endOffset)
@@ -304,6 +383,10 @@ bool RenderWareReader::ParseClump(
 
             case ChunkAtomic:
                 ParseAtomic(reader, child, model);
+                break;
+
+            case ChunkLight:
+                ++model.renderWareLightCount;
                 break;
 
             case ChunkExtension:
@@ -341,10 +424,15 @@ void RenderWareReader::ParseClumpExtension(
             break;
         }
 
-        if (plugin.type == PluginSampCollision)
+        if (plugin.type == PluginNormalCollision)
+        {
+            model.hasNormalCollision = true;
+            model.normalCollisionValid =
+                model.normalCollisionValid || plugin.length != 0;
+        }
+        else if (plugin.type == PluginSampCollision)
         {
             model.hasSampCollision = true;
-            model.sampCollisionValid = false;
 
             if (plugin.length >= 32)
             {
@@ -352,8 +440,9 @@ void RenderWareReader::ParseClumpExtension(
                 const std::uint32_t magic = reader.ReadU32();
                 const std::uint32_t declaredSize = reader.ReadU32();
                 model.sampCollisionValid =
-                    magic == 0x334C4F43 &&
-                    declaredSize <= plugin.length - 8;
+                    model.sampCollisionValid ||
+                    (magic == 0x334C4F43 &&
+                     declaredSize <= plugin.length - 8);
             }
         }
 
@@ -537,6 +626,7 @@ bool RenderWareReader::ParseGeometry(
     reader.Seek(geometryStruct.dataOffset);
 
     const std::uint16_t flags = reader.ReadU16();
+    geometry.flags = flags;
     std::uint8_t texCoordSetCount = reader.ReadU8();
     reader.ReadU8();
 

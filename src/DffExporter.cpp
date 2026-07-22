@@ -1,7 +1,6 @@
 #include "DffExporter.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -9,7 +8,9 @@
 namespace
 {
     constexpr std::uint32_t ChunkExtension = 0x00000003;
+    constexpr std::uint32_t ChunkStruct = 0x00000001;
     constexpr std::uint32_t ChunkClump = 0x00000010;
+    constexpr std::uint32_t ChunkLight = 0x00000012;
 
     constexpr std::uint32_t NormalCollisionPluginId = 0x0253F2FA;
     constexpr std::uint32_t SampCollisionPluginId = 0x0253F2FF;
@@ -72,9 +73,26 @@ bool DffExporter::BuildExportBytes(
 
     output = document.sourceBytes;
 
-    if (!document.hasCollision)
+    if (!EnsureRenderWareLights(output, document.model, error))
+    {
+        return false;
+    }
+
+    if (document.collisionExportMode == CollisionExportMode::Remove)
+    {
+        return RemoveEmbeddedCollision(output, error);
+    }
+
+    if (document.collisionExportMode ==
+        CollisionExportMode::PreserveSource)
     {
         return true;
+    }
+
+    if (!document.hasCollision)
+    {
+        error = "Collision attach/replace was requested without generated collision data.";
+        return false;
     }
 
     const std::vector<std::uint8_t> collision =
@@ -83,11 +101,487 @@ bool DffExporter::BuildExportBytes(
     return EmbedSampCollision(output, collision, error);
 }
 
+bool DffExporter::EnsureRenderWareLights(
+    std::vector<std::uint8_t>& dffBytes,
+    const ModelData& model,
+    std::string& error) const
+{
+    if (model.omniLightCount == 0)
+    {
+        return true;
+    }
+
+    ChunkLocation clump{};
+    if (!ReadChunk(dffBytes, 0, dffBytes.size(), clump) ||
+        clump.type != ChunkClump)
+    {
+        error = "The source file does not contain a valid root clump.";
+        return false;
+    }
+
+    ChunkLocation clumpStruct{};
+    ChunkLocation firstClumpExtension{};
+    bool foundStruct = false;
+    bool foundExtension = false;
+
+    struct ExistingLight
+    {
+        ChunkLocation frameSection{};
+        ChunkLocation lightSection{};
+    };
+
+    std::vector<ExistingLight> existingLights;
+    std::size_t actualLightChunkCount = 0;
+    std::size_t unpairedLightChunkCount = 0;
+    ChunkLocation pendingFrameSection{};
+    bool hasPendingFrameSection = false;
+    std::size_t cursor = clump.dataOffset;
+
+    while (cursor + RenderWareChunkHeaderSize <= clump.endOffset)
+    {
+        ChunkLocation child{};
+        if (!ReadChunk(dffBytes, cursor, clump.endOffset, child))
+        {
+            error = "The source DFF contains a damaged clump section.";
+            return false;
+        }
+
+        if (!foundStruct && child.type == ChunkStruct)
+        {
+            clumpStruct = child;
+            foundStruct = true;
+        }
+
+        if (!foundExtension && child.type == ChunkExtension)
+        {
+            firstClumpExtension = child;
+            foundExtension = true;
+        }
+
+        if (child.type == ChunkStruct && child.length == 4)
+        {
+            pendingFrameSection = child;
+            hasPendingFrameSection = true;
+        }
+        else if (child.type == ChunkLight)
+        {
+            ++actualLightChunkCount;
+            if (hasPendingFrameSection)
+            {
+                existingLights.push_back({pendingFrameSection, child});
+            }
+            else
+            {
+                ++unpairedLightChunkCount;
+            }
+            hasPendingFrameSection = false;
+        }
+        else
+        {
+            hasPendingFrameSection = false;
+        }
+
+        cursor = child.endOffset;
+    }
+
+    if (!foundStruct || clumpStruct.length < 12)
+    {
+        error = "The clump does not have room for its Light section count.";
+        return false;
+    }
+
+    struct PendingLight
+    {
+        std::uint32_t frameIndex = 0;
+        const Effect2D* effect = nullptr;
+    };
+
+    std::vector<PendingLight> pendingLights;
+    std::vector<bool> usedFrames(model.frames.size(), false);
+
+    auto addGeometryLights = [&](const Geometry& geometry, const Mat4& transform)
+    {
+        for (const Effect2D& effect : geometry.effects2d)
+        {
+            if (effect.type != 0)
+            {
+                continue;
+            }
+
+            const Vec3 position = TransformPoint(transform, effect.position);
+            std::size_t bestFrame = model.frames.size();
+            float bestDistanceSquared = std::numeric_limits<float>::max();
+
+            for (std::size_t frameIndex = 0;
+                 frameIndex < model.frames.size();
+                 ++frameIndex)
+            {
+                if (usedFrames[frameIndex])
+                {
+                    continue;
+                }
+
+                const Mat4& world = model.frames[frameIndex].worldTransform;
+                const Vec3 framePosition{world.m[12], world.m[13], world.m[14]};
+                const Vec3 difference = framePosition - position;
+                const float distanceSquared = Dot(difference, difference);
+
+                if (distanceSquared < bestDistanceSquared)
+                {
+                    bestDistanceSquared = distanceSquared;
+                    bestFrame = frameIndex;
+                }
+            }
+
+            if (bestFrame < model.frames.size() &&
+                bestDistanceSquared <= 0.01f)
+            {
+                usedFrames[bestFrame] = true;
+                pendingLights.push_back({
+                    static_cast<std::uint32_t>(bestFrame),
+                    &effect});
+            }
+        }
+    };
+
+    if (!model.atomics.empty())
+    {
+        for (const Atomic& atomic : model.atomics)
+        {
+            if (atomic.geometryIndex < 0 ||
+                static_cast<std::size_t>(atomic.geometryIndex) >=
+                    model.geometries.size())
+            {
+                continue;
+            }
+
+            Mat4 transform{};
+            if (atomic.frameIndex >= 0 &&
+                static_cast<std::size_t>(atomic.frameIndex) < model.frames.size())
+            {
+                transform = model.frames[
+                    static_cast<std::size_t>(atomic.frameIndex)].worldTransform;
+            }
+
+            addGeometryLights(
+                model.geometries[
+                    static_cast<std::size_t>(atomic.geometryIndex)],
+                transform);
+        }
+    }
+    else
+    {
+        for (const Geometry& geometry : model.geometries)
+        {
+            addGeometryLights(geometry, Mat4{});
+        }
+    }
+
+    if (pendingLights.size() != model.omniLightCount)
+    {
+        error = "A 2DFX light does not have a matching Light frame.";
+        return false;
+    }
+
+    std::sort(
+        pendingLights.begin(),
+        pendingLights.end(),
+        [](const PendingLight& left, const PendingLight& right)
+        {
+            return left.frameIndex < right.frameIndex;
+        });
+
+    if (actualLightChunkCount != 0)
+    {
+        if (unpairedLightChunkCount != 0 ||
+            existingLights.size() != actualLightChunkCount)
+        {
+            error = "The source DFF contains an unpaired or damaged Light section.";
+            return false;
+        }
+
+        if (existingLights.size() != pendingLights.size())
+        {
+            error = "The actual RenderWare Light chunks do not match the 2DFX omni lights.";
+            return false;
+        }
+
+        for (std::size_t index = 0; index < pendingLights.size(); ++index)
+        {
+            const PendingLight& expected = pendingLights[index];
+            const ExistingLight& existing = existingLights[index];
+
+            ChunkLocation lightStruct{};
+            if (!ReadChunk(
+                    dffBytes,
+                    existing.lightSection.dataOffset,
+                    existing.lightSection.endOffset,
+                    lightStruct) ||
+                lightStruct.type != ChunkStruct ||
+                lightStruct.length < 24)
+            {
+                error = "The source DFF contains a damaged Light value section.";
+                return false;
+            }
+
+            WriteU32(
+                dffBytes,
+                existing.frameSection.dataOffset,
+                expected.frameIndex);
+
+            const std::size_t valueOffset = lightStruct.dataOffset;
+
+            // The RenderWare Light radius is not the 2DFX point-light range.
+            // Preserve the source radius: stock traffic lights use 1.0 while
+            // normal SA building lights commonly use 200.0.
+            WriteF32(
+                dffBytes,
+                valueOffset + 4,
+                static_cast<float>(expected.effect->color.r) / 255.0f);
+            WriteF32(
+                dffBytes,
+                valueOffset + 8,
+                static_cast<float>(expected.effect->color.g) / 255.0f);
+            WriteF32(
+                dffBytes,
+                valueOffset + 12,
+                static_cast<float>(expected.effect->color.b) / 255.0f);
+            WriteF32(dffBytes, valueOffset + 16, 0.0f);
+            WriteU16(dffBytes, valueOffset + 20, 3);
+            WriteU16(dffBytes, valueOffset + 22, 0x80);
+        }
+
+        // Preserve the original declared count. GTA SA files are inconsistent:
+        // some valid files declare zero but still contain real Light chunks.
+        return true;
+    }
+
+    std::vector<std::uint8_t> lightSections;
+    const float newLightRadius = model.trafficLightSignature ? 1.0f : 200.0f;
+
+    for (const PendingLight& light : pendingLights)
+    {
+        std::vector<std::uint8_t> framePayload;
+        AppendU32(framePayload, light.frameIndex);
+        const std::vector<std::uint8_t> frameSection =
+            BuildChunk(ChunkStruct, clump.version, framePayload);
+
+        std::vector<std::uint8_t> lightStructPayload;
+        AppendF32(lightStructPayload, newLightRadius);
+        AppendF32(lightStructPayload,
+            static_cast<float>(light.effect->color.r) / 255.0f);
+        AppendF32(lightStructPayload,
+            static_cast<float>(light.effect->color.g) / 255.0f);
+        AppendF32(lightStructPayload,
+            static_cast<float>(light.effect->color.b) / 255.0f);
+        AppendF32(lightStructPayload, 0.0f);
+        AppendU16(lightStructPayload, 3);
+        AppendU16(lightStructPayload, 0x80);
+
+        const std::vector<std::uint8_t> lightStruct =
+            BuildChunk(ChunkStruct, clump.version, lightStructPayload);
+        const std::vector<std::uint8_t> lightExtension =
+            BuildChunk(ChunkExtension, clump.version, {});
+
+        std::vector<std::uint8_t> lightPayload;
+        lightPayload.insert(
+            lightPayload.end(), lightStruct.begin(), lightStruct.end());
+        lightPayload.insert(
+            lightPayload.end(), lightExtension.begin(), lightExtension.end());
+        const std::vector<std::uint8_t> lightSection =
+            BuildChunk(ChunkLight, clump.version, lightPayload);
+
+        lightSections.insert(
+            lightSections.end(), frameSection.begin(), frameSection.end());
+        lightSections.insert(
+            lightSections.end(), lightSection.begin(), lightSection.end());
+    }
+
+    const std::size_t insertOffset = foundExtension
+        ? firstClumpExtension.headerOffset
+        : clump.endOffset;
+
+    dffBytes.insert(
+        dffBytes.begin() + static_cast<std::ptrdiff_t>(insertOffset),
+        lightSections.begin(),
+        lightSections.end());
+
+    const std::uint32_t declaredCount = model.trafficLightSignature
+        ? static_cast<std::uint32_t>(pendingLights.size())
+        : 0;
+    WriteU32(dffBytes, clumpStruct.dataOffset + 4, declaredCount);
+
+    const std::uint64_t newClumpLength =
+        static_cast<std::uint64_t>(clump.length) + lightSections.size();
+    if (newClumpLength > std::numeric_limits<std::uint32_t>::max())
+    {
+        error = "The rebuilt DFF is too large.";
+        return false;
+    }
+
+    WriteU32(dffBytes, 4, static_cast<std::uint32_t>(newClumpLength));
+    return true;
+}
+bool DffExporter::RemoveEmbeddedCollision(
+    std::vector<std::uint8_t>& dffBytes,
+    std::string& error) const
+{
+    ChunkLocation clump{};
+
+    if (!ReadChunk(dffBytes, 0, dffBytes.size(), clump) ||
+        clump.type != ChunkClump)
+    {
+        error = "The source file does not contain a valid root RenderWare clump.";
+        return false;
+    }
+
+    std::vector<std::uint8_t> clumpPayload;
+    clumpPayload.reserve(clump.length);
+
+    bool removedAnyCollision = false;
+    std::size_t cursor = clump.dataOffset;
+
+    while (cursor + RenderWareChunkHeaderSize <= clump.endOffset)
+    {
+        ChunkLocation child{};
+
+        if (!ReadChunk(dffBytes, cursor, clump.endOffset, child))
+        {
+            error = "The source DFF contains a malformed top-level clump child.";
+            return false;
+        }
+
+        if (child.type != ChunkExtension)
+        {
+            clumpPayload.insert(
+                clumpPayload.end(),
+                dffBytes.begin() + static_cast<std::ptrdiff_t>(
+                    child.headerOffset),
+                dffBytes.begin() + static_cast<std::ptrdiff_t>(
+                    child.endOffset));
+
+            cursor = child.endOffset;
+            continue;
+        }
+
+        std::vector<std::uint8_t> extensionPayload;
+        extensionPayload.reserve(child.length);
+        bool removedCollisionFromExtension = false;
+        std::size_t pluginCursor = child.dataOffset;
+
+        while (pluginCursor + RenderWareChunkHeaderSize <= child.endOffset)
+        {
+            ChunkLocation plugin{};
+
+            if (!ReadChunk(
+                    dffBytes,
+                    pluginCursor,
+                    child.endOffset,
+                    plugin))
+            {
+                extensionPayload.insert(
+                    extensionPayload.end(),
+                    dffBytes.begin() + static_cast<std::ptrdiff_t>(
+                        pluginCursor),
+                    dffBytes.begin() + static_cast<std::ptrdiff_t>(
+                        child.endOffset));
+
+                pluginCursor = child.endOffset;
+                break;
+            }
+
+            if (IsCollisionPlugin(plugin.type))
+            {
+                removedAnyCollision = true;
+                removedCollisionFromExtension = true;
+            }
+            else
+            {
+                extensionPayload.insert(
+                    extensionPayload.end(),
+                    dffBytes.begin() + static_cast<std::ptrdiff_t>(
+                        plugin.headerOffset),
+                    dffBytes.begin() + static_cast<std::ptrdiff_t>(
+                        plugin.endOffset));
+            }
+
+            pluginCursor = plugin.endOffset;
+        }
+
+        if (pluginCursor < child.endOffset)
+        {
+            extensionPayload.insert(
+                extensionPayload.end(),
+                dffBytes.begin() + static_cast<std::ptrdiff_t>(pluginCursor),
+                dffBytes.begin() + static_cast<std::ptrdiff_t>(child.endOffset));
+        }
+
+        if (!extensionPayload.empty() ||
+            !removedCollisionFromExtension)
+        {
+            const std::vector<std::uint8_t> rebuiltExtension =
+                BuildChunk(ChunkExtension, child.version, extensionPayload);
+
+            clumpPayload.insert(
+                clumpPayload.end(),
+                rebuiltExtension.begin(),
+                rebuiltExtension.end());
+        }
+
+        cursor = child.endOffset;
+    }
+
+    if (cursor < clump.endOffset)
+    {
+        clumpPayload.insert(
+            clumpPayload.end(),
+            dffBytes.begin() + static_cast<std::ptrdiff_t>(cursor),
+            dffBytes.begin() + static_cast<std::ptrdiff_t>(clump.endOffset));
+    }
+
+    if (!removedAnyCollision)
+    {
+        return true;
+    }
+
+    const std::vector<std::uint8_t> rebuiltClump =
+        BuildChunk(ChunkClump, clump.version, clumpPayload);
+
+    std::vector<std::uint8_t> rebuilt;
+    rebuilt.reserve(
+        dffBytes.size() -
+        (clump.endOffset - clump.headerOffset) +
+        rebuiltClump.size());
+
+    rebuilt.insert(
+        rebuilt.end(),
+        dffBytes.begin(),
+        dffBytes.begin() + static_cast<std::ptrdiff_t>(clump.headerOffset));
+
+    rebuilt.insert(
+        rebuilt.end(),
+        rebuiltClump.begin(),
+        rebuiltClump.end());
+
+    rebuilt.insert(
+        rebuilt.end(),
+        dffBytes.begin() + static_cast<std::ptrdiff_t>(clump.endOffset),
+        dffBytes.end());
+
+    dffBytes = std::move(rebuilt);
+    return true;
+}
+
 bool DffExporter::EmbedSampCollision(
     std::vector<std::uint8_t>& dffBytes,
     const std::vector<std::uint8_t>& col3Bytes,
     std::string& error) const
 {
+    if (!RemoveEmbeddedCollision(dffBytes, error))
+    {
+        return false;
+    }
+
     ChunkLocation clump{};
 
     if (!ReadChunk(dffBytes, 0, dffBytes.size(), clump) ||
@@ -487,6 +981,26 @@ void DffExporter::WriteU32(
     bytes[offset + 1] = static_cast<std::uint8_t>((value >> 8) & 0xFF);
     bytes[offset + 2] = static_cast<std::uint8_t>((value >> 16) & 0xFF);
     bytes[offset + 3] = static_cast<std::uint8_t>((value >> 24) & 0xFF);
+}
+
+void DffExporter::WriteU16(
+    std::vector<std::uint8_t>& bytes,
+    std::size_t offset,
+    std::uint16_t value)
+{
+    bytes[offset] = static_cast<std::uint8_t>(value & 0xFF);
+    bytes[offset + 1] = static_cast<std::uint8_t>((value >> 8) & 0xFF);
+}
+
+void DffExporter::WriteF32(
+    std::vector<std::uint8_t>& bytes,
+    std::size_t offset,
+    float value)
+{
+    std::uint32_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(value));
+    std::memcpy(&bits, &value, sizeof(bits));
+    WriteU32(bytes, offset, bits);
 }
 
 void DffExporter::AppendU8(
