@@ -1,5 +1,7 @@
 # ODFF
 
+[![License](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
+
 **ODFF** is an open source model conversion program for SAMP/OMP. That is, it will attach the proper SAMP collision to an object or object group of your choice, allowing the object(s) to display and be used correctly in SA-MP/open.mp.
 
 <img width="1917" height="1117" alt="image" src="https://github.com/user-attachments/assets/96110ba7-8736-45a5-8dc4-0740567ab716" />
