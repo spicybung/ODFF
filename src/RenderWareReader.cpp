@@ -813,7 +813,10 @@ void RenderWareReader::Parse2DFX(
     }
 
     const std::uint32_t count = reader.ReadU32();
-    geometry.effects2d.reserve(geometry.effects2d.size() + count);
+    const std::size_t bytesRemaining = plugin.endOffset - reader.Position();
+    const std::size_t maximumPossibleCount = bytesRemaining / 20;
+    const std::size_t safeCount = std::min<std::size_t>(count, maximumPossibleCount);
+    geometry.effects2d.reserve(geometry.effects2d.size() + safeCount);
 
     for (std::uint32_t index = 0; index < count; ++index)
     {
@@ -832,26 +835,32 @@ void RenderWareReader::Parse2DFX(
             break;
         }
 
-        const std::size_t payloadStart = reader.Position();
-
-        if (effect.type == 0 && payloadSize >= 76)
+        effect.rawPayload = reader.ReadBytes(payloadSize);
+        if (effect.type == 0 && effect.rawPayload.size() >= 75)
         {
+            BinaryReader payloadReader(effect.rawPayload);
             effect.color = {
-                reader.ReadU8(), reader.ReadU8(),
-                reader.ReadU8(), reader.ReadU8()};
-            effect.coronaFarClip = reader.ReadF32();
-            effect.pointLightRange = reader.ReadF32();
-            effect.coronaSize = reader.ReadF32();
-            effect.shadowSize = reader.ReadF32();
-            reader.Skip(4);
-            effect.flags1 = reader.ReadU8();
-            reader.Skip(48);
-            reader.ReadU8();
-            effect.flags2 = reader.ReadU8();
+                payloadReader.ReadU8(),
+                payloadReader.ReadU8(),
+                payloadReader.ReadU8(),
+                payloadReader.ReadU8()};
+            effect.coronaFarClip = payloadReader.ReadF32();
+            effect.pointLightRange = payloadReader.ReadF32();
+            effect.coronaSize = payloadReader.ReadF32();
+            effect.shadowSize = payloadReader.ReadF32();
+            effect.showMode = payloadReader.ReadU8();
+            effect.reflectionEnabled = payloadReader.ReadU8();
+            effect.flareType = payloadReader.ReadU8();
+            effect.shadowColorMultiplier = payloadReader.ReadU8();
+            effect.flags1 = payloadReader.ReadU8();
+            effect.coronaTextureName = payloadReader.ReadFixedString(24);
+            effect.shadowTextureName = payloadReader.ReadFixedString(24);
+            effect.shadowZDistance = payloadReader.ReadU8();
+            effect.flags2 = payloadReader.ReadU8();
+            effect.payloadValid = true;
         }
 
-        geometry.effects2d.push_back(effect);
-        reader.Seek(payloadStart + payloadSize);
+        geometry.effects2d.push_back(std::move(effect));
     }
 }
 
@@ -1027,22 +1036,55 @@ bool RenderWareReader::ParseAtomic(
 
 void RenderWareReader::BuildWorldTransforms(ModelData& model)
 {
-    for (std::size_t index = 0; index < model.frames.size(); ++index)
+    enum class FrameState : std::uint8_t
     {
-        Frame& frame = model.frames[index];
+        NotVisited,
+        Visiting,
+        Ready
+    };
 
-        if (frame.parentIndex >= 0 &&
-            static_cast<std::size_t>(frame.parentIndex) < model.frames.size() &&
-            static_cast<std::size_t>(frame.parentIndex) != index)
+    std::vector<FrameState> states(model.frames.size(), FrameState::NotVisited);
+
+    auto buildFrame = [&](auto&& buildFrame, std::size_t index) -> void
+    {
+        if (index >= model.frames.size() || states[index] == FrameState::Ready)
         {
+            return;
+        }
+
+        Frame& frame = model.frames[index];
+        if (states[index] == FrameState::Visiting)
+        {
+            frame.worldTransform = frame.localTransform;
+            states[index] = FrameState::Ready;
+            return;
+        }
+
+        states[index] = FrameState::Visiting;
+        const bool hasValidParent =
+            frame.parentIndex >= 0 &&
+            static_cast<std::size_t>(frame.parentIndex) < model.frames.size() &&
+            static_cast<std::size_t>(frame.parentIndex) != index;
+
+        if (hasValidParent)
+        {
+            const std::size_t parentIndex = static_cast<std::size_t>(frame.parentIndex);
+            buildFrame(buildFrame, parentIndex);
             frame.worldTransform = Multiply(
-                model.frames[static_cast<std::size_t>(frame.parentIndex)].worldTransform,
+                model.frames[parentIndex].worldTransform,
                 frame.localTransform);
         }
         else
         {
             frame.worldTransform = frame.localTransform;
         }
+
+        states[index] = FrameState::Ready;
+    };
+
+    for (std::size_t index = 0; index < model.frames.size(); ++index)
+    {
+        buildFrame(buildFrame, index);
     }
 }
 

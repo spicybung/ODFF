@@ -235,7 +235,7 @@ bool Application::Initialize()
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
 
-    window = glfwCreateWindow(1280, 820, "ODFF v0.2.1", nullptr, nullptr);
+    window = glfwCreateWindow(1280, 820, "ODFF v0.2.3", nullptr, nullptr);
     if (window == nullptr)
     {
         glfwTerminate();
@@ -396,7 +396,7 @@ void Application::DrawToolbar()
     ImGui::SameLine();
     ImGui::Checkbox("Collision", &showCollision);
     ImGui::SameLine();
-    ImGui::Checkbox("Omni lights", &showEffects2D);
+    ImGui::Checkbox("Lights", &showEffects2D);
     ImGui::SameLine();
     ImGui::Checkbox("Grid", &showGrid);
 
@@ -408,9 +408,9 @@ void Application::DrawToolbar()
         MessageBoxA(
             nullptr,
             "View DFF and TXD files, and add or remove collision.\n\n"
-            "https://github.com/spicybung\n\n"
+            "https://github.com/spicybung/ODFF\n\n"
             "Reigns Studios\n\n"
-            "v 0.2.1 2026",
+            "v 0.2.3 2026",
             "About ODFF",
             MB_OK | MB_ICONINFORMATION);
 #endif
@@ -569,22 +569,14 @@ void Application::DrawProperties()
         }
         ImGui::PopID();
 
-        ImGui::Text("Omni lights: %zu", document->model.omniLightCount);
-
-        const bool lightSectionPassed =
-            document->model.omniLightCount == 0 ||
-            document->model.renderWareLightCount >=
-                document->model.omniLightCount;
+        ImGui::Text("Lights: %zu", document->model.omniLightCount);
 
         if (document->model.omniLightCount != 0)
         {
             ImGui::PushID("light-status");
-            DrawStatusMark(lightSectionPassed);
+            DrawStatusMark(true);
             ImGui::SameLine();
-            ImGui::TextUnformatted(
-                lightSectionPassed
-                    ? "Light data: OK"
-                    : "Light data: Missing");
+            ImGui::TextUnformatted("2DFX data: OK");
             ImGui::PopID();
         }
 
@@ -732,45 +724,155 @@ void Application::DrawProperties()
         ImGui::BeginChild("TextureList", ImVec2(0.0f, 180.0f), true);
         for (const TxdTextureInfo& texture : txd.textures)
         {
+            auto lowerName = [](const std::string& value)
+            {
+                std::string result = value;
+                std::transform(
+                    result.begin(),
+                    result.end(),
+                    result.begin(),
+                    [](unsigned char character)
+                    {
+                        return static_cast<char>(std::tolower(character));
+                    });
+                return result;
+            };
+
+            const std::string textureName = lowerName(texture.name);
+            bool materialAlpha = false;
+            bool vertexAlpha = false;
+
+            for (const std::unique_ptr<ModelDocument>& openDocument : documents)
+            {
+                if (openDocument == nullptr)
+                {
+                    continue;
+                }
+
+                for (const Geometry& geometry : openDocument->model.geometries)
+                {
+                    for (std::size_t materialIndex = 0;
+                         materialIndex < geometry.materials.size();
+                         ++materialIndex)
+                    {
+                        const MaterialInfo& material = geometry.materials[materialIndex];
+                        if (lowerName(material.textureName) != textureName)
+                        {
+                            continue;
+                        }
+
+                        materialAlpha = materialAlpha || material.color.a < 255;
+
+                        for (const Triangle& triangle : geometry.triangles)
+                        {
+                            if (triangle.materialIndex != materialIndex)
+                            {
+                                continue;
+                            }
+
+                            const std::uint32_t indices[3] = {
+                                triangle.a,
+                                triangle.b,
+                                triangle.c
+                            };
+
+                            for (const std::uint32_t index : indices)
+                            {
+                                if (index < geometry.colors.size() &&
+                                    geometry.colors[index].a < 255)
+                                {
+                                    vertexAlpha = true;
+                                    break;
+                                }
+                            }
+
+                            if (vertexAlpha)
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
             ImGui::Text("%s", texture.name.empty() ? "<unnamed>" : texture.name.c_str());
             ImGui::SameLine();
+
             if (!texture.decodeError.empty())
             {
                 ImGui::TextDisabled("[broken]");
             }
-            else if (!texture.hasAlpha)
-            {
-                ImGui::TextDisabled("[no alpha]");
-            }
             else if (texture.sampAlphaPreferred)
             {
-                ImGui::TextDisabled("[alpha]");
+                ImGui::TextDisabled("[texture alpha]");
             }
             else if (texture.sampPreviewUsesAlpha)
             {
-                ImGui::TextDisabled("[alpha, large]");
+                ImGui::TextDisabled("[texture alpha, large]");
             }
             else if (texture.sampAlphaExperimental)
             {
-                ImGui::TextDisabled("[DXT5, no alpha]");
+                ImGui::TextDisabled("[DXT5 alpha disabled]");
+            }
+            else if (texture.hasAlpha)
+            {
+                ImGui::TextDisabled("[texture alpha disabled]");
+            }
+            else if (materialAlpha && vertexAlpha)
+            {
+                ImGui::TextDisabled("[material + vertex alpha]");
+            }
+            else if (materialAlpha)
+            {
+                ImGui::TextDisabled("[material alpha]");
+            }
+            else if (vertexAlpha)
+            {
+                ImGui::TextDisabled("[vertex alpha]");
             }
             else
             {
-                ImGui::TextDisabled("[no alpha]");
+                ImGui::TextDisabled("[opaque]");
             }
 
             if (ImGui::IsItemHovered())
             {
                 if (texture.decodeError.empty())
                 {
+                    std::string alphaSources;
+                    if (texture.hasAlpha)
+                    {
+                        alphaSources += "Texture pixels contain alpha.";
+                    }
+                    if (materialAlpha)
+                    {
+                        if (!alphaSources.empty())
+                        {
+                            alphaSources += "\n";
+                        }
+                        alphaSources += "A model material using this texture is semi-transparent.";
+                    }
+                    if (vertexAlpha)
+                    {
+                        if (!alphaSources.empty())
+                        {
+                            alphaSources += "\n";
+                        }
+                        alphaSources += "Model vertices using this texture contain alpha.";
+                    }
+                    if (alphaSources.empty())
+                    {
+                        alphaSources = "No transparency was found in the texture or loaded model.";
+                    }
+
                     ImGui::SetTooltip(
-                        "%ux%u, %u-bit, %u mipmaps, platform %u%s\n%s",
+                        "%ux%u, %u-bit, %u mipmaps, platform %u\n%s\n%s",
                         texture.width,
                         texture.height,
                         texture.depth,
                         texture.mipmapCount,
                         texture.platformId,
-                        texture.hasAlpha ? ", decoded alpha" : "",
+                        alphaSources.c_str(),
                         texture.sampCompatibility.c_str());
                 }
                 else

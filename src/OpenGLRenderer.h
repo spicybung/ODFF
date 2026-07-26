@@ -78,7 +78,8 @@ private:
         const CollisionData& collision) const;
 
     void DrawEffects2D(
-        const ModelData& model) const;
+        const ModelData& model,
+        const TxdData* textureDictionary) const;
     void CollectGeometryLights(
         const Geometry& geometry,
         const Mat4& transform,
@@ -91,7 +92,8 @@ private:
         const Mat4& transform,
         const std::vector<WorldLight>& lights) const;
     void DrawLightGlows(
-        const std::vector<WorldLight>& lights) const;
+        const std::vector<WorldLight>& lights,
+        const TxdData* textureDictionary) const;
 
     void DrawGrid(
         float extent,

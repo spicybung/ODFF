@@ -135,12 +135,12 @@ bool DffExporter::BuildExportBytes(
         return false;
     }
 
+    // Export from the original DFF bytes. 2DFX effects already belong to the
+    // geometry extension and must not be converted into extra frame objects.
+    // Rebuilding the frame list here changed the model rotation in exported
+    // files and duplicated the light frames. Existing RenderWare Light chunks
+    // remain untouched because they are already part of sourceBytes.
     output = document.sourceBytes;
-
-    if (!EnsureRenderWareLights(output, document.model, error))
-    {
-        return false;
-    }
 
     if (document.collisionExportMode ==
         CollisionExportMode::PreserveSource)

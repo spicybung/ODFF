@@ -273,7 +273,7 @@ void OpenGLRenderer::Render(
 
         if (showEffects2D)
         {
-            DrawEffects2D(document->model);
+            DrawEffects2D(document->model, textureDictionary);
         }
 
     }
@@ -286,7 +286,8 @@ void OpenGLRenderer::Render(
 }
 
 void OpenGLRenderer::DrawEffects2D(
-    const ModelData& model) const
+    const ModelData& model,
+    const TxdData* textureDictionary) const
 {
     std::vector<WorldLight> lights;
     lights.reserve(model.omniLightCount);
@@ -328,6 +329,7 @@ void OpenGLRenderer::DrawEffects2D(
     }
 
     DrawPointLightPass(model, lights);
+    DrawLightGlows(lights, textureDictionary);
 }
 
 void OpenGLRenderer::CollectGeometryLights(
@@ -451,7 +453,8 @@ void OpenGLRenderer::DrawGeometryPointLightPass(
 }
 
 void OpenGLRenderer::DrawLightGlows(
-    const std::vector<WorldLight>& lights) const
+    const std::vector<WorldLight>& lights,
+    const TxdData* textureDictionary) const
 {
     float modelView[16]{};
     glGetFloatv(GL_MODELVIEW_MATRIX, modelView);
@@ -459,9 +462,7 @@ void OpenGLRenderer::DrawLightGlows(
     const Vec3 right{modelView[0], modelView[4], modelView[8]};
     const Vec3 up{modelView[1], modelView[5], modelView[9]};
 
-    glDisable(GL_TEXTURE_2D);
     glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
     glDepthMask(GL_FALSE);
 
     constexpr int SegmentCount = 32;
@@ -474,14 +475,29 @@ void OpenGLRenderer::DrawLightGlows(
             continue;
         }
 
+        const TxdTextureInfo* sourceTexture = FindTexture(
+            textureDictionary,
+            light.effect.coronaTextureName);
+        const UploadedTexture* coronaTexture =
+            sourceTexture != nullptr ? UploadTexture(*sourceTexture) : nullptr;
+
+        if (coronaTexture != nullptr && coronaTexture->id != 0)
+        {
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, coronaTexture->id);
+            glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+        }
+        else
+        {
+            glDisable(GL_TEXTURE_2D);
+        }
+
         const float size = light.effect.coronaSize;
         const float red = static_cast<float>(light.effect.color.r) / 255.0f;
         const float green = static_cast<float>(light.effect.color.g) / 255.0f;
         const float blue = static_cast<float>(light.effect.color.b) / 255.0f;
-        const float sourceAlpha =
-            static_cast<float>(light.effect.color.a) / 255.0f;
+        const float sourceAlpha = static_cast<float>(light.effect.color.a) / 255.0f;
         const float glowAlpha = std::clamp(sourceAlpha * 0.35f, 0.08f, 0.35f);
-        const float coreAlpha = std::clamp(sourceAlpha * 0.42f, 0.12f, 0.42f);
 
         if ((light.effect.flags1 & 1) != 0)
         {
@@ -492,44 +508,47 @@ void OpenGLRenderer::DrawLightGlows(
             glDisable(GL_DEPTH_TEST);
         }
 
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-        glBegin(GL_TRIANGLE_FAN);
-        glColor4f(red, green, blue, glowAlpha);
-        glVertex3f(light.position.x, light.position.y, light.position.z);
-
-        glColor4f(red, green, blue, 0.0f);
-        for (int segment = 0; segment <= SegmentCount; ++segment)
+        if (coronaTexture != nullptr && coronaTexture->id != 0)
         {
-            const float angle = TwoPi * static_cast<float>(segment) /
-                static_cast<float>(SegmentCount);
-            const Vec3 offset =
-                right * (std::cos(angle) * size) +
-                up * (std::sin(angle) * size);
-            const Vec3 vertex = light.position + offset;
-            glVertex3f(vertex.x, vertex.y, vertex.z);
+            const Vec3 horizontal = right * size;
+            const Vec3 vertical = up * size;
+            const Vec3 bottomLeft = light.position - horizontal - vertical;
+            const Vec3 bottomRight = light.position + horizontal - vertical;
+            const Vec3 topRight = light.position + horizontal + vertical;
+            const Vec3 topLeft = light.position - horizontal + vertical;
+
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+            glColor4f(red, green, blue, sourceAlpha);
+            glBegin(GL_QUADS);
+            glTexCoord2f(0.0f, 1.0f); glVertex3f(bottomLeft.x, bottomLeft.y, bottomLeft.z);
+            glTexCoord2f(1.0f, 1.0f); glVertex3f(bottomRight.x, bottomRight.y, bottomRight.z);
+            glTexCoord2f(1.0f, 0.0f); glVertex3f(topRight.x, topRight.y, topRight.z);
+            glTexCoord2f(0.0f, 0.0f); glVertex3f(topLeft.x, topLeft.y, topLeft.z);
+            glEnd();
         }
-        glEnd();
-
-        const float coreSize = size * 0.16f;
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glBegin(GL_TRIANGLE_FAN);
-        glColor4f(1.0f, 1.0f, 1.0f, coreAlpha);
-        glVertex3f(light.position.x, light.position.y, light.position.z);
-
-        glColor4f(red, green, blue, 0.0f);
-        for (int segment = 0; segment <= SegmentCount; ++segment)
+        else
         {
-            const float angle = TwoPi * static_cast<float>(segment) /
-                static_cast<float>(SegmentCount);
-            const Vec3 offset =
-                right * (std::cos(angle) * coreSize) +
-                up * (std::sin(angle) * coreSize);
-            const Vec3 vertex = light.position + offset;
-            glVertex3f(vertex.x, vertex.y, vertex.z);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+            glBegin(GL_TRIANGLE_FAN);
+            glColor4f(red, green, blue, glowAlpha);
+            glVertex3f(light.position.x, light.position.y, light.position.z);
+            glColor4f(red, green, blue, 0.0f);
+
+            for (int segment = 0; segment <= SegmentCount; ++segment)
+            {
+                const float angle = TwoPi * static_cast<float>(segment) /
+                    static_cast<float>(SegmentCount);
+                const Vec3 offset =
+                    right * (std::cos(angle) * size) +
+                    up * (std::sin(angle) * size);
+                const Vec3 vertex = light.position + offset;
+                glVertex3f(vertex.x, vertex.y, vertex.z);
+            }
+            glEnd();
         }
-        glEnd();
     }
 
+    glDisable(GL_TEXTURE_2D);
     glEnable(GL_DEPTH_TEST);
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);

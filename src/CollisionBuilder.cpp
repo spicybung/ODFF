@@ -81,27 +81,7 @@ CollisionData CollisionBuilder::Build(
 CollisionData CollisionBuilder::BuildBox(const ModelData& model) const
 {
     CollisionData collision{};
-    collision.mode = CollisionMode::Box;
-    collision.bounds = model.bounds;
-
-    if (!model.bounds.valid)
-    {
-        return collision;
-    }
-
-    const Vec3& minimum = model.bounds.minimum;
-    const Vec3& maximum = model.bounds.maximum;
-
-    collision.vertices = {
-        {minimum.x, minimum.y, minimum.z},
-        {maximum.x, minimum.y, minimum.z},
-        {maximum.x, maximum.y, minimum.z},
-        {minimum.x, maximum.y, minimum.z},
-        {minimum.x, minimum.y, maximum.z},
-        {maximum.x, minimum.y, maximum.z},
-        {maximum.x, maximum.y, maximum.z},
-        {minimum.x, maximum.y, maximum.z}
-    };
+    collision.mode = CollisionMode::MeshFaces;
 
     const std::uint16_t indices[][3] = {
         {0, 2, 1}, {0, 3, 2},
@@ -112,9 +92,68 @@ CollisionData CollisionBuilder::BuildBox(const ModelData& model) const
         {3, 0, 4}, {3, 4, 7}
     };
 
-    for (const auto& face : indices)
+    auto appendBox = [&](const Bounds& bounds, const Mat4& transform)
     {
-        collision.faces.push_back({face[0], face[1], face[2], 0, 0});
+        if (!bounds.valid || collision.vertices.size() > 65528)
+        {
+            return;
+        }
+
+        const Vec3& minimum = bounds.minimum;
+        const Vec3& maximum = bounds.maximum;
+        const Vec3 corners[8] = {
+            {minimum.x, minimum.y, minimum.z},
+            {maximum.x, minimum.y, minimum.z},
+            {maximum.x, maximum.y, minimum.z},
+            {minimum.x, maximum.y, minimum.z},
+            {minimum.x, minimum.y, maximum.z},
+            {maximum.x, minimum.y, maximum.z},
+            {maximum.x, maximum.y, maximum.z},
+            {minimum.x, maximum.y, maximum.z}
+        };
+
+        const std::uint16_t firstVertex =
+            static_cast<std::uint16_t>(collision.vertices.size());
+        for (const Vec3& corner : corners)
+        {
+            const Vec3 transformed = TransformPoint(transform, corner);
+            if (!IsFiniteVector(transformed))
+            {
+                return;
+            }
+            collision.vertices.push_back(transformed);
+            collision.bounds.Expand(transformed);
+        }
+
+        for (const auto& face : indices)
+        {
+            collision.faces.push_back({
+                static_cast<std::uint16_t>(firstVertex + face[0]),
+                static_cast<std::uint16_t>(firstVertex + face[1]),
+                static_cast<std::uint16_t>(firstVertex + face[2]),
+                0,
+                0});
+        }
+    };
+
+    for (const Atomic& atomic : model.atomics)
+    {
+        if (atomic.geometryIndex < 0 ||
+            static_cast<std::size_t>(atomic.geometryIndex) >= model.geometries.size())
+        {
+            continue;
+        }
+
+        Mat4 transform{};
+        if (atomic.frameIndex >= 0 &&
+            static_cast<std::size_t>(atomic.frameIndex) < model.frames.size())
+        {
+            transform = model.frames[static_cast<std::size_t>(atomic.frameIndex)].worldTransform;
+        }
+
+        appendBox(
+            model.geometries[static_cast<std::size_t>(atomic.geometryIndex)].bounds,
+            transform);
     }
 
     return collision;
@@ -130,10 +169,6 @@ CollisionData CollisionBuilder::BuildMesh(
     {
         constexpr std::uint32_t missingIndex =
             std::numeric_limits<std::uint32_t>::max();
-
-        constexpr std::size_t maximumCollisionVertexCount =
-            static_cast<std::size_t>(
-                std::numeric_limits<std::uint16_t>::max()) + 1;
 
         std::vector<std::uint32_t> vertexMap(
             geometry.vertices.size(),
@@ -152,7 +187,9 @@ CollisionData CollisionBuilder::BuildMesh(
                 return mappedIndex;
             }
 
-            if (collision.vertices.size() >= maximumCollisionVertexCount)
+            if (collision.vertices.size() >
+                static_cast<std::size_t>(
+                    std::numeric_limits<std::uint16_t>::max()))
             {
                 return missingIndex;
             }

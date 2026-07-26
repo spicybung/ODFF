@@ -30,8 +30,17 @@ struct Effect2D
     float pointLightRange = 0.0f;
     float coronaSize = 0.0f;
     float shadowSize = 0.0f;
+    std::uint8_t showMode = 0;
+    std::uint8_t reflectionEnabled = 0;
+    std::uint8_t flareType = 0;
+    std::uint8_t shadowColorMultiplier = 0;
     std::uint8_t flags1 = 0;
+    std::string coronaTextureName;
+    std::string shadowTextureName;
+    std::uint8_t shadowZDistance = 0;
     std::uint8_t flags2 = 0;
+    std::vector<std::uint8_t> rawPayload;
+    bool payloadValid = false;
 };
 
 struct Geometry
