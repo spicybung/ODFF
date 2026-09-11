@@ -161,4 +161,12 @@ void Camera::CalculateBasis(
     });
 
     up = Normalize(Cross(right, forward));
+
+    const float rollRadians = DegreesToRadians(roll);
+    const float cosineRoll = std::cos(rollRadians);
+    const float sineRoll = std::sin(rollRadians);
+    const Vec3 rolledRight = right * cosineRoll + up * sineRoll;
+    const Vec3 rolledUp = up * cosineRoll - right * sineRoll;
+    right = Normalize(rolledRight);
+    up = Normalize(rolledUp);
 }

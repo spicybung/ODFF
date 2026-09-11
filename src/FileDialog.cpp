@@ -99,6 +99,15 @@ std::filesystem::path FileDialog::OpenTxdFile()
     return files.empty() ? std::filesystem::path{} : files.front();
 }
 
+std::filesystem::path FileDialog::OpenColFile()
+{
+    const auto files = OpenFiles(
+        L"GTA Collision Library (*.col)\0*.col\0All files (*.*)\0*.*\0",
+        false);
+
+    return files.empty() ? std::filesystem::path{} : files.front();
+}
+
 std::filesystem::path SelectFolderWithTitle(const wchar_t* title)
 {
     BROWSEINFOW browse{};
@@ -152,6 +161,11 @@ std::vector<std::filesystem::path> FileDialog::OpenDffFiles(bool)
 }
 
 std::filesystem::path FileDialog::OpenTxdFile()
+{
+    return {};
+}
+
+std::filesystem::path FileDialog::OpenColFile()
 {
     return {};
 }

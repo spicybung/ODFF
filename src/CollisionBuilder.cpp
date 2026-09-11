@@ -132,7 +132,7 @@ CollisionData CollisionBuilder::BuildBox(const ModelData& model) const
                 static_cast<std::uint16_t>(firstVertex + face[1]),
                 static_cast<std::uint16_t>(firstVertex + face[2]),
                 0,
-                0});
+                DefaultPackedCollisionLight});
         }
     };
 
@@ -259,7 +259,7 @@ CollisionData CollisionBuilder::BuildMesh(
                 static_cast<std::uint16_t>(ic),
                 static_cast<std::uint8_t>(
                     triangle.materialIndex & 0xFF),
-                0
+                DefaultPackedCollisionLight
             });
         }
     };

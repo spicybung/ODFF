@@ -11,9 +11,12 @@ namespace
     constexpr std::uint32_t ChunkStruct = 0x00000001;
     constexpr std::uint32_t ChunkClump = 0x00000010;
     constexpr std::uint32_t ChunkLight = 0x00000012;
+    constexpr std::uint32_t ChunkGeometry = 0x0000000F;
+    constexpr std::uint32_t ChunkGeometryList = 0x0000001A;
 
     constexpr std::uint32_t NormalCollisionPluginId = 0x0253F2FA;
     constexpr std::uint32_t SampCollisionPluginId = 0x0253F2FF;
+    constexpr std::uint32_t BreakableModelPluginId = 0x0253F2FD;
 
     constexpr std::size_t RenderWareChunkHeaderSize = 12;
     constexpr std::uint32_t Col3HeaderOffsetBase = 116;
@@ -112,6 +115,10 @@ bool DffExporter::DetachCollisionFromDocument(
 
     document.sourceBytes = std::move(detachedBytes);
     document.collision = {};
+    document.importedCollisionBytes.clear();
+    document.importedCollisionName.clear();
+    document.importedCollisionFormat.clear();
+    document.importedCollisionFromLibrary = false;
     document.hasCollision = false;
     document.collisionDetached = true;
     document.collisionExportMode = CollisionExportMode::PreserveSource;
@@ -142,6 +149,18 @@ bool DffExporter::BuildExportBytes(
     // remain untouched because they are already part of sourceBytes.
     output = document.sourceBytes;
 
+    if (document.breakableStateInitialized)
+    {
+        if (!ApplyBreakableModelState(
+                output,
+                document.model,
+                document.breakableEnabled,
+                error))
+        {
+            return false;
+        }
+    }
+
     if (document.collisionExportMode ==
         CollisionExportMode::PreserveSource)
     {
@@ -154,10 +173,329 @@ bool DffExporter::BuildExportBytes(
         return false;
     }
 
+    // Every collision ODFF attaches is exported in SA-MP form. A collision
+    // imported from a standalone GTA .COL library is decoded into
+    // CollisionData first, then rebuilt as SA-MP COL3 here. Never embed the
+    // source COLL/COL2/COL3/COL4 bytes directly into a DFF plugin.
     const std::vector<std::uint8_t> collision =
         BuildSampCol3(document.collision);
 
     return EmbedSampCollision(output, collision, error);
+}
+
+
+bool DffExporter::ApplyBreakableModelState(
+    std::vector<std::uint8_t>& dffBytes,
+    const ModelData& model,
+    bool enabled,
+    std::string& error) const
+{
+    ChunkLocation clump{};
+    if (!ReadChunk(dffBytes, 0, dffBytes.size(), clump) ||
+        clump.type != ChunkClump)
+    {
+        error = "The source file does not contain a valid root clump.";
+        return false;
+    }
+
+    std::vector<std::uint8_t> rebuiltClumpPayload;
+    rebuiltClumpPayload.reserve(clump.length + 4096);
+    std::size_t cursor = clump.dataOffset;
+    std::size_t geometryIndex = 0;
+    bool foundGeometryList = false;
+
+    while (cursor + RenderWareChunkHeaderSize <= clump.endOffset)
+    {
+        ChunkLocation child{};
+        if (!ReadChunk(dffBytes, cursor, clump.endOffset, child))
+        {
+            error = "The source DFF contains a damaged clump section.";
+            return false;
+        }
+
+        if (child.type != ChunkGeometryList)
+        {
+            rebuiltClumpPayload.insert(
+                rebuiltClumpPayload.end(),
+                dffBytes.begin() + static_cast<std::ptrdiff_t>(child.headerOffset),
+                dffBytes.begin() + static_cast<std::ptrdiff_t>(child.endOffset));
+            cursor = child.endOffset;
+            continue;
+        }
+
+        foundGeometryList = true;
+        std::vector<std::uint8_t> rebuiltGeometryListPayload;
+        rebuiltGeometryListPayload.reserve(child.length + 4096);
+        std::size_t geometryCursor = child.dataOffset;
+
+        while (geometryCursor + RenderWareChunkHeaderSize <= child.endOffset)
+        {
+            ChunkLocation geometryChild{};
+            if (!ReadChunk(dffBytes, geometryCursor, child.endOffset, geometryChild))
+            {
+                error = "The source DFF contains a damaged geometry list.";
+                return false;
+            }
+
+            if (geometryChild.type != ChunkGeometry)
+            {
+                rebuiltGeometryListPayload.insert(
+                    rebuiltGeometryListPayload.end(),
+                    dffBytes.begin() + static_cast<std::ptrdiff_t>(geometryChild.headerOffset),
+                    dffBytes.begin() + static_cast<std::ptrdiff_t>(geometryChild.endOffset));
+                geometryCursor = geometryChild.endOffset;
+                continue;
+            }
+
+            if (geometryIndex >= model.geometries.size())
+            {
+                error = "The parsed geometry count does not match the source DFF.";
+                return false;
+            }
+
+            const Geometry& geometry = model.geometries[geometryIndex++];
+            std::vector<std::uint8_t> rebuiltGeometryPayload;
+            rebuiltGeometryPayload.reserve(geometryChild.length + 4096);
+            std::size_t itemCursor = geometryChild.dataOffset;
+            bool foundExtension = false;
+
+            while (itemCursor + RenderWareChunkHeaderSize <= geometryChild.endOffset)
+            {
+                ChunkLocation item{};
+                if (!ReadChunk(dffBytes, itemCursor, geometryChild.endOffset, item))
+                {
+                    error = "The source DFF contains a damaged geometry section.";
+                    return false;
+                }
+
+                if (item.type != ChunkExtension)
+                {
+                    rebuiltGeometryPayload.insert(
+                        rebuiltGeometryPayload.end(),
+                        dffBytes.begin() + static_cast<std::ptrdiff_t>(item.headerOffset),
+                        dffBytes.begin() + static_cast<std::ptrdiff_t>(item.endOffset));
+                    itemCursor = item.endOffset;
+                    continue;
+                }
+
+                foundExtension = true;
+                std::vector<std::uint8_t> extensionPayload;
+                extensionPayload.reserve(item.length + 4096);
+                std::size_t pluginCursor = item.dataOffset;
+
+                while (pluginCursor + RenderWareChunkHeaderSize <= item.endOffset)
+                {
+                    ChunkLocation plugin{};
+                    if (!ReadChunk(dffBytes, pluginCursor, item.endOffset, plugin))
+                    {
+                        error = "The source DFF contains a damaged geometry extension.";
+                        return false;
+                    }
+
+                    if (plugin.type != BreakableModelPluginId)
+                    {
+                        extensionPayload.insert(
+                            extensionPayload.end(),
+                            dffBytes.begin() + static_cast<std::ptrdiff_t>(plugin.headerOffset),
+                            dffBytes.begin() + static_cast<std::ptrdiff_t>(plugin.endOffset));
+                    }
+                    pluginCursor = plugin.endOffset;
+                }
+
+                if (enabled)
+                {
+                    const std::vector<std::uint8_t> breakable =
+                        BuildBreakablePlugin(geometry, item.version);
+                    extensionPayload.insert(
+                        extensionPayload.end(),
+                        breakable.begin(),
+                        breakable.end());
+                }
+
+                const std::vector<std::uint8_t> rebuiltExtension =
+                    BuildChunk(ChunkExtension, item.version, extensionPayload);
+                rebuiltGeometryPayload.insert(
+                    rebuiltGeometryPayload.end(),
+                    rebuiltExtension.begin(),
+                    rebuiltExtension.end());
+
+                itemCursor = item.endOffset;
+            }
+
+            if (!foundExtension && enabled)
+            {
+                const std::vector<std::uint8_t> breakable =
+                    BuildBreakablePlugin(geometry, geometryChild.version);
+                const std::vector<std::uint8_t> extension =
+                    BuildChunk(ChunkExtension, geometryChild.version, breakable);
+                rebuiltGeometryPayload.insert(
+                    rebuiltGeometryPayload.end(),
+                    extension.begin(),
+                    extension.end());
+            }
+
+            const std::vector<std::uint8_t> rebuiltGeometry =
+                BuildChunk(ChunkGeometry, geometryChild.version, rebuiltGeometryPayload);
+            rebuiltGeometryListPayload.insert(
+                rebuiltGeometryListPayload.end(),
+                rebuiltGeometry.begin(),
+                rebuiltGeometry.end());
+
+            geometryCursor = geometryChild.endOffset;
+        }
+
+        const std::vector<std::uint8_t> rebuiltGeometryList =
+            BuildChunk(ChunkGeometryList, child.version, rebuiltGeometryListPayload);
+        rebuiltClumpPayload.insert(
+            rebuiltClumpPayload.end(),
+            rebuiltGeometryList.begin(),
+            rebuiltGeometryList.end());
+        cursor = child.endOffset;
+    }
+
+    if (!foundGeometryList)
+    {
+        error = "The source DFF does not contain a geometry list.";
+        return false;
+    }
+
+    if (geometryIndex != model.geometries.size())
+    {
+        error = "The parsed geometry count does not match the source DFF.";
+        return false;
+    }
+
+    std::vector<std::uint8_t> rebuilt =
+        BuildChunk(ChunkClump, clump.version, rebuiltClumpPayload);
+    rebuilt.insert(
+        rebuilt.end(),
+        dffBytes.begin() + static_cast<std::ptrdiff_t>(clump.endOffset),
+        dffBytes.end());
+    dffBytes = std::move(rebuilt);
+    return true;
+}
+
+std::vector<std::uint8_t> DffExporter::BuildBreakablePlugin(
+    const Geometry& geometry,
+    std::uint32_t version) const
+{
+    std::vector<std::uint8_t> payload;
+
+    const std::size_t vertexCount = std::min<std::size_t>(
+        geometry.vertices.size(),
+        std::numeric_limits<std::uint16_t>::max());
+    const std::size_t triangleCount = std::min<std::size_t>(
+        geometry.triangles.size(),
+        std::numeric_limits<std::uint16_t>::max());
+    const std::size_t materialCount = std::min<std::size_t>(
+        geometry.materials.size(),
+        std::numeric_limits<std::uint16_t>::max());
+
+    // Rockstar's Breakable Model extension. DragonFF uses 0x64646464 as
+    // the enabled magic and position rule 1 for ordinary exported objects.
+    AppendU32(payload, 0x64646464u);
+    AppendU32(payload, 1u);
+
+    AppendU16(payload, static_cast<std::uint16_t>(vertexCount));
+    AppendU16(payload, 0u);
+    AppendU32(payload, 0u); // position offset (unused by the game/DragonFF writer)
+    AppendU32(payload, 0u); // uv offset
+    AppendU32(payload, 0u); // prelight offset
+
+    AppendU16(payload, static_cast<std::uint16_t>(triangleCount));
+    AppendU16(payload, 0u);
+    AppendU32(payload, 0u); // vertex index offset
+    AppendU32(payload, 0u); // material index offset
+
+    AppendU16(payload, static_cast<std::uint16_t>(materialCount));
+    AppendU16(payload, 0u);
+    AppendU32(payload, 0u); // texture block offset
+    AppendU32(payload, 0u); // texture name offset
+    AppendU32(payload, 0u); // texture mask offset
+    AppendU32(payload, 0u); // ambient colour offset
+
+    for (std::size_t index = 0; index < vertexCount; ++index)
+    {
+        const Vec3& position = geometry.vertices[index];
+        AppendF32(payload, position.x);
+        AppendF32(payload, position.y);
+        AppendF32(payload, position.z);
+    }
+
+    for (std::size_t index = 0; index < vertexCount; ++index)
+    {
+        Vec2 uv{};
+        if (index < geometry.texCoords.size())
+        {
+            uv = geometry.texCoords[index];
+        }
+        AppendF32(payload, uv.x);
+        AppendF32(payload, uv.y);
+    }
+
+    for (std::size_t index = 0; index < vertexCount; ++index)
+    {
+        Color4 color{255, 255, 255, 255};
+        if (index < geometry.colors.size())
+        {
+            color = geometry.colors[index];
+        }
+        AppendU8(payload, color.r);
+        AppendU8(payload, color.g);
+        AppendU8(payload, color.b);
+        AppendU8(payload, color.a);
+    }
+
+    for (std::size_t index = 0; index < triangleCount; ++index)
+    {
+        const Triangle& triangle = geometry.triangles[index];
+        AppendU16(payload, static_cast<std::uint16_t>(triangle.a));
+        AppendU16(payload, static_cast<std::uint16_t>(triangle.b));
+        AppendU16(payload, static_cast<std::uint16_t>(triangle.c));
+    }
+
+    for (std::size_t index = 0; index < triangleCount; ++index)
+    {
+        const Triangle& triangle = geometry.triangles[index];
+        const std::uint16_t material = materialCount == 0
+            ? 0u
+            : static_cast<std::uint16_t>(std::min<std::size_t>(
+                triangle.materialIndex,
+                materialCount - 1));
+        AppendU16(payload, material);
+    }
+
+    auto appendFixed32 = [&](const std::string& text)
+    {
+        char bytes[32]{};
+        const std::size_t count = std::min<std::size_t>(text.size(), 31u);
+        if (count != 0)
+        {
+            std::memcpy(bytes, text.data(), count);
+        }
+        payload.insert(
+            payload.end(),
+            reinterpret_cast<const std::uint8_t*>(bytes),
+            reinterpret_cast<const std::uint8_t*>(bytes) + sizeof(bytes));
+    };
+
+    for (std::size_t index = 0; index < materialCount; ++index)
+    {
+        appendFixed32(geometry.materials[index].textureName);
+    }
+    for (std::size_t index = 0; index < materialCount; ++index)
+    {
+        appendFixed32(geometry.materials[index].maskName);
+    }
+    for (std::size_t index = 0; index < materialCount; ++index)
+    {
+        const Color4& color = geometry.materials[index].color;
+        AppendF32(payload, static_cast<float>(color.r) / 255.0f);
+        AppendF32(payload, static_cast<float>(color.g) / 255.0f);
+        AppendF32(payload, static_cast<float>(color.b) / 255.0f);
+    }
+
+    return BuildChunk(BreakableModelPluginId, version, payload);
 }
 
 bool DffExporter::EnsureRenderWareLights(

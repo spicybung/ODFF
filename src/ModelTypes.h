@@ -39,6 +39,8 @@ struct Effect2D
     std::string shadowTextureName;
     std::uint8_t shadowZDistance = 0;
     std::uint8_t flags2 = 0;
+    Vec3 lookDirection{};
+    bool hasLookDirection = false;
     std::vector<std::uint8_t> rawPayload;
     bool payloadValid = false;
 };
@@ -51,9 +53,11 @@ struct Geometry
     std::vector<Vec3> normals;
     std::vector<Vec2> texCoords;
     std::vector<Color4> colors;
+    std::vector<Color4> nightColors;
     std::vector<Triangle> triangles;
     std::vector<MaterialInfo> materials;
     std::vector<Effect2D> effects2d;
+    bool hasBreakableModel = false;
     Bounds bounds;
 };
 

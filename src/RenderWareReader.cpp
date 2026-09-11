@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <sstream>
 #include <stdexcept>
@@ -24,6 +25,8 @@ namespace
     constexpr std::uint32_t ChunkGeometryList = 0x0000001A;
     constexpr std::uint32_t PluginFrameName = 0x0253F2FE;
     constexpr std::uint32_t Plugin2DFX = 0x0253F2F8;
+    constexpr std::uint32_t PluginBreakableModel = 0x0253F2FD;
+    constexpr std::uint32_t PluginExtraVertColor = 0x0253F2F9;
     constexpr std::uint32_t PluginNormalCollision = 0x0253F2FA;
     constexpr std::uint32_t PluginSampCollision = 0x0253F2FF;
 
@@ -216,6 +219,222 @@ std::vector<std::uint8_t> RenderWareReader::BinaryReader::ReadBytes(std::size_t 
 
     position += count;
     return result;
+}
+
+
+bool RenderWareReader::ValidateDff(
+    const std::filesystem::path& path,
+    DffValidationResult& result)
+{
+    result = {};
+
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream)
+    {
+        result.error = "Could not open DFF file.";
+        return false;
+    }
+
+    const std::istreambuf_iterator<char> begin(stream);
+    const std::istreambuf_iterator<char> end;
+    std::vector<std::uint8_t> bytes(begin, end);
+
+    auto readU32At = [&](std::size_t offset, std::uint32_t& value) -> bool
+    {
+        if (offset + 4 > bytes.size())
+        {
+            return false;
+        }
+
+        value =
+            static_cast<std::uint32_t>(bytes[offset]) |
+            (static_cast<std::uint32_t>(bytes[offset + 1]) << 8) |
+            (static_cast<std::uint32_t>(bytes[offset + 2]) << 16) |
+            (static_cast<std::uint32_t>(bytes[offset + 3]) << 24);
+        return true;
+    };
+
+    auto readHeader = [&](std::size_t offset, ChunkHeader& header) -> bool
+    {
+        std::uint32_t type = 0;
+        std::uint32_t length = 0;
+        std::uint32_t version = 0;
+
+        if (!readU32At(offset, type) ||
+            !readU32At(offset + 4, length) ||
+            !readU32At(offset + 8, version))
+        {
+            return false;
+        }
+
+        const std::size_t dataOffset = offset + 12;
+        if (length > bytes.size() - dataOffset)
+        {
+            return false;
+        }
+
+        header.type = type;
+        header.length = length;
+        header.version = version;
+        header.dataOffset = dataOffset;
+        header.endOffset = dataOffset + length;
+        return true;
+    };
+
+    if (bytes.size() < 12)
+    {
+        result.error = "File is too small to contain a RenderWare chunk header.";
+        return false;
+    }
+
+    ChunkHeader root{};
+    if (!readHeader(0, root))
+    {
+        result.error = "Root RenderWare chunk header is truncated or invalid.";
+        return false;
+    }
+
+    if (root.type != ChunkClump)
+    {
+        result.error = "Root chunk is not a RenderWare Clump.";
+        return false;
+    }
+
+    result.clumpValid = true;
+
+    std::uint32_t declaredAtomicCount = 0;
+    bool foundClumpStruct = false;
+    std::size_t directAtomicCount = 0;
+
+    auto validateExtension = [&](const ChunkHeader& extension) -> bool
+    {
+        std::size_t position = extension.dataOffset;
+
+        while (position < extension.endOffset)
+        {
+            if (extension.endOffset - position < 12)
+            {
+                result.error = "Extension contains trailing bytes that do not form a complete plugin header.";
+                return false;
+            }
+
+            ChunkHeader plugin{};
+            if (!readHeader(position, plugin) || plugin.endOffset > extension.endOffset)
+            {
+                result.error = "Extension plugin chunk is truncated or extends beyond its parent extension.";
+                return false;
+            }
+
+            ++result.extensionCount;
+            position = plugin.endOffset;
+        }
+
+        return position == extension.endOffset;
+    };
+
+    std::function<bool(const ChunkHeader&)> scanContainer;
+    scanContainer = [&](const ChunkHeader& container) -> bool
+    {
+        std::size_t position = container.dataOffset;
+
+        while (position < container.endOffset)
+        {
+            if (container.endOffset - position < 12)
+            {
+                result.error = "RenderWare container contains an incomplete child chunk header.";
+                return false;
+            }
+
+            ChunkHeader child{};
+            if (!readHeader(position, child) || child.endOffset > container.endOffset)
+            {
+                result.error = "RenderWare child chunk is truncated or extends beyond its parent.";
+                return false;
+            }
+
+            if (container.type == ChunkClump && child.type == ChunkStruct && !foundClumpStruct)
+            {
+                if (child.length < 4 || !readU32At(child.dataOffset, declaredAtomicCount))
+                {
+                    result.error = "Clump struct is missing the declared atomic count.";
+                    return false;
+                }
+                foundClumpStruct = true;
+            }
+
+            if (container.type == ChunkClump && child.type == ChunkAtomic)
+            {
+                ++directAtomicCount;
+            }
+
+            if (child.type == ChunkExtension)
+            {
+                if (!validateExtension(child))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                const bool childIsContainer =
+                    child.type == ChunkClump ||
+                    child.type == ChunkFrameList ||
+                    child.type == ChunkGeometryList ||
+                    child.type == ChunkGeometry ||
+                    child.type == ChunkMaterialList ||
+                    child.type == ChunkMaterial ||
+                    child.type == ChunkTexture ||
+                    child.type == ChunkAtomic;
+
+                if (childIsContainer && !scanContainer(child))
+                {
+                    return false;
+                }
+            }
+
+            position = child.endOffset;
+        }
+
+        return position == container.endOffset;
+    };
+
+    if (!scanContainer(root))
+    {
+        return false;
+    }
+
+    if (!foundClumpStruct)
+    {
+        result.error = "Clump struct chunk is missing.";
+        return false;
+    }
+
+    result.atomicCount = directAtomicCount;
+    result.atomicsValid = directAtomicCount == declaredAtomicCount;
+    if (!result.atomicsValid)
+    {
+        std::ostringstream message;
+        message << "Clump declares " << declaredAtomicCount
+                << " atomics, but " << directAtomicCount
+                << " Atomic chunks were found.";
+        result.error = message.str();
+        return false;
+    }
+
+    result.extensionsValid = true;
+
+    ModelData parsedModel{};
+    std::string parseError;
+    if (!LoadDff(path, parsedModel, parseError))
+    {
+        result.error = parseError.empty()
+            ? "RenderWare parser rejected the DFF."
+            : parseError;
+        return false;
+    }
+
+    result.valid = true;
+    return true;
 }
 
 bool RenderWareReader::LoadDff(const std::filesystem::path& path, ModelData& model, std::string& error)
@@ -796,8 +1015,70 @@ void RenderWareReader::ParseGeometryExtension(
         {
             Parse2DFX(reader, plugin, geometry);
         }
+        else if (plugin.type == PluginExtraVertColor)
+        {
+            ParseExtraVertexColors(reader, plugin, geometry);
+        }
+        else if (plugin.type == PluginBreakableModel)
+        {
+            // Rockstar Breakable Model extension. A zero magic value is an
+            // explicit disabled placeholder; any non-zero magic means the
+            // geometry carries a real breakable payload.
+            if (plugin.length >= 4)
+            {
+                const std::size_t savedPosition = reader.Position();
+                reader.Seek(plugin.dataOffset);
+                geometry.hasBreakableModel = reader.ReadU32() != 0;
+                reader.Seek(savedPosition);
+            }
+        }
 
         reader.Seek(plugin.endOffset);
+    }
+}
+
+
+void RenderWareReader::ParseExtraVertexColors(
+    BinaryReader& reader,
+    const ChunkHeader& plugin,
+    Geometry& geometry)
+{
+    geometry.nightColors.clear();
+
+    reader.Seek(plugin.dataOffset);
+    if (plugin.length < 4 || !reader.CanRead(4))
+    {
+        return;
+    }
+
+    // Rockstar Extra Vert Color (0x0253F2F9): a non-zero 32-bit
+    // presence marker followed by one RGBA value per geometry vertex.
+    const std::uint32_t present = reader.ReadU32();
+    if (present == 0)
+    {
+        return;
+    }
+
+    const std::size_t vertexCount = geometry.vertices.size();
+    const std::size_t bytesRequired = vertexCount * 4;
+    const std::size_t bytesAvailable = plugin.endOffset - reader.Position();
+
+    // Do not expose a partial night-colour set: the renderer can then
+    // reliably fall back to the day/prelight colours.
+    if (bytesAvailable < bytesRequired)
+    {
+        return;
+    }
+
+    geometry.nightColors.reserve(vertexCount);
+    for (std::size_t index = 0; index < vertexCount; ++index)
+    {
+        Color4 color{};
+        color.r = reader.ReadU8();
+        color.g = reader.ReadU8();
+        color.b = reader.ReadU8();
+        color.a = reader.ReadU8();
+        geometry.nightColors.push_back(color);
     }
 }
 
@@ -857,6 +1138,24 @@ void RenderWareReader::Parse2DFX(
             effect.shadowTextureName = payloadReader.ReadFixedString(24);
             effect.shadowZDistance = payloadReader.ReadU8();
             effect.flags2 = payloadReader.ReadU8();
+
+            // GTA SA's 80-byte light form stores three signed look-direction
+            // bytes at payload offsets 75..77. Keep them for CHECK_DIRECTION
+            // corona previews instead of discarding the extended form.
+            if (effect.rawPayload.size() >= 78)
+            {
+                auto signedByte = [&](std::size_t offset) -> float
+                {
+                    return static_cast<float>(
+                        static_cast<std::int8_t>(effect.rawPayload[offset])) / 127.0f;
+                };
+                effect.lookDirection = {
+                    signedByte(75),
+                    signedByte(76),
+                    signedByte(77)};
+                effect.hasLookDirection = true;
+            }
+
             effect.payloadValid = true;
         }
 

@@ -43,12 +43,14 @@ private:
     void DrawModel(
         const ModelData& model,
         bool wireframe,
-        const TxdData* textureDictionary) const;
+        const TxdData* textureDictionary,
+        bool showNightVertexColors) const;
 
     void DrawGeometry(
         const Geometry& geometry,
         const Mat4& transform,
-        const TxdData* textureDictionary) const;
+        const TxdData* textureDictionary,
+        bool showNightVertexColors) const;
 
     const TxdTextureInfo* FindTexture(
         const TxdData* textureDictionary,
@@ -61,7 +63,8 @@ private:
         const Geometry& geometry,
         const MaterialInfo* material,
         std::uint16_t materialIndex,
-        const UploadedTexture* texture) const;
+        const UploadedTexture* texture,
+        bool showNightVertexColors) const;
 
     void DrawCollision(
         const CollisionData& collision,
@@ -79,7 +82,10 @@ private:
 
     void DrawEffects2D(
         const ModelData& model,
-        const TxdData* textureDictionary) const;
+        const TxdData* textureDictionary,
+        bool dynamicLighting,
+        bool nightPreview,
+        const Vec3& cameraPosition) const;
     void CollectGeometryLights(
         const Geometry& geometry,
         const Mat4& transform,
@@ -93,7 +99,9 @@ private:
         const std::vector<WorldLight>& lights) const;
     void DrawLightGlows(
         const std::vector<WorldLight>& lights,
-        const TxdData* textureDictionary) const;
+        const TxdData* textureDictionary,
+        bool nightPreview,
+        const Vec3& cameraPosition) const;
 
     void DrawGrid(
         float extent,

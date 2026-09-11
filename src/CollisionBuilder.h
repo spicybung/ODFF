@@ -13,13 +13,30 @@ enum class CollisionMode
     MeshFaces
 };
 
+constexpr std::uint8_t DefaultCollisionDayLight = 15;
+constexpr std::uint8_t DefaultCollisionNightLight = 15;
+
+constexpr std::uint8_t PackCollisionLight(
+    std::uint8_t dayLight,
+    std::uint8_t nightLight)
+{
+    return static_cast<std::uint8_t>(
+        ((dayLight & 0x0F) << 4) |
+        (nightLight & 0x0F));
+}
+
+constexpr std::uint8_t DefaultPackedCollisionLight =
+    PackCollisionLight(
+        DefaultCollisionDayLight,
+        DefaultCollisionNightLight);
+
 struct CollisionFace
 {
     std::uint16_t a = 0;
     std::uint16_t b = 0;
     std::uint16_t c = 0;
     std::uint8_t material = 0;
-    std::uint8_t light = 0;
+    std::uint8_t light = DefaultPackedCollisionLight;
 };
 
 struct CollisionData

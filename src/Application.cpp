@@ -235,7 +235,7 @@ bool Application::Initialize()
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
 
-    window = glfwCreateWindow(1280, 820, "ODFF v0.2.3", nullptr, nullptr);
+    window = glfwCreateWindow(1280, 820, "ODFF v0.2.5", nullptr, nullptr);
     if (window == nullptr)
     {
         glfwTerminate();
@@ -253,7 +253,7 @@ bool Application::Initialize()
     ImGui::CreateContext();
 
     ImGuiIO& io = ImGui::GetIO();
-    (void)io;
+    io.IniFilename = nullptr; // ODFF owns no persistent ImGui layout file; prevents imgui.ini being written into the current working directory.
 
     ImGui::StyleColorsDark();
 
@@ -261,6 +261,10 @@ bool Application::Initialize()
     style.WindowRounding = 2.0f;
     style.FrameRounding = 2.0f;
     style.ScrollbarRounding = 2.0f;
+
+    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.105f, 0.108f, 0.118f, 1.0f);
+    style.Colors[ImGuiCol_ChildBg] = ImVec4(0.092f, 0.095f, 0.104f, 1.0f);
+    style.Colors[ImGuiCol_PopupBg] = ImVec4(0.115f, 0.118f, 0.128f, 0.98f);
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL2_Init();
@@ -410,7 +414,7 @@ void Application::DrawToolbar()
             "View DFF and TXD files, and add or remove collision.\n\n"
             "https://github.com/spicybung/ODFF\n\n"
             "Reigns Studios\n\n"
-            "v 0.2.3 2026",
+            "v 0.2.5 2026",
             "About ODFF",
             MB_OK | MB_ICONINFORMATION);
 #endif
@@ -422,38 +426,69 @@ void Application::DrawModelList()
     ImGui::TextUnformatted("DFF Group");
     ImGui::Separator();
 
-    for (std::size_t index = 0; index < documents.size(); ++index)
+    ImGuiListClipper clipper;
+    clipper.Begin(static_cast<int>(documents.size()));
+
+    while (clipper.Step())
     {
-        const bool selected = index == selectedIndex;
-
-        ImGui::PushID(static_cast<int>(index));
-        const bool sourceCollisionValid =
-            (documents[index]->model.hasNormalCollision &&
-             documents[index]->model.normalCollisionValid) ||
-            (documents[index]->model.hasSampCollision &&
-             documents[index]->model.sampCollisionValid);
-
-        const bool collisionStateAccepted =
-            documents[index]->collisionDetached ||
-            documents[index]->collisionExportMode ==
-                CollisionExportMode::AttachOrReplace ||
-            sourceCollisionValid;
-
-        DrawStatusMark(collisionStateAccepted);
-        ImGui::SameLine();
-
-        if (ImGui::Selectable(documents[index]->displayName.c_str(), selected))
+        for (int visibleIndex = clipper.DisplayStart;
+             visibleIndex < clipper.DisplayEnd;
+             ++visibleIndex)
         {
-            selectedIndex = index;
-            camera.Frame(documents[index]->model.bounds);
-        }
+            const std::size_t index = static_cast<std::size_t>(visibleIndex);
+            const bool selected = index == selectedIndex;
+            const ModelDocument& document = *documents[index];
 
-        if (selected)
-        {
-            ImGui::SetItemDefaultFocus();
-        }
+            ImGui::PushID(visibleIndex);
 
-        ImGui::PopID();
+            if (document.validationState == ModelValidationState::NotScanned)
+            {
+                const float markSize = ImGui::GetTextLineHeight();
+                ImGui::InvisibleButton("##unscanned", ImVec2(markSize, markSize));
+                ImDrawList* drawList = ImGui::GetWindowDrawList();
+                const ImVec2 center = ImVec2(
+                    ImGui::GetItemRectMin().x + markSize * 0.5f,
+                    ImGui::GetItemRectMin().y + markSize * 0.5f);
+                drawList->AddCircle(
+                    center,
+                    markSize * 0.25f,
+                    IM_COL32(135, 140, 150, 255),
+                    12,
+                    1.5f);
+            }
+            else
+            {
+                DrawStatusMark(
+                    document.validationState == ModelValidationState::Passed);
+            }
+            ImGui::SameLine();
+
+            if (ImGui::Selectable(document.displayName.c_str(), selected))
+            {
+                const std::size_t previousIndex = selectedIndex;
+                selectedIndex = index;
+
+                const bool loaded = EnsureDocumentLoaded(selectedIndex);
+                if (loaded)
+                {
+                    camera.Frame(documents[selectedIndex]->model.bounds);
+                    FindAndLoadMatchingTxd(
+                        {documents[selectedIndex]->sourcePath});
+                }
+
+                if (previousIndex != selectedIndex)
+                {
+                    UnloadDocumentIfPristine(previousIndex);
+                }
+            }
+
+            if (selected)
+            {
+                ImGui::SetItemDefaultFocus();
+            }
+
+            ImGui::PopID();
+        }
     }
 }
 
@@ -471,6 +506,48 @@ void Application::DrawProperties()
     else
     {
         ImGui::TextWrapped("%s", document->displayName.c_str());
+
+        ImGui::PushID("model-validation");
+        if (document->validationState == ModelValidationState::NotScanned)
+        {
+            ImGui::TextDisabled("Model: not scanned");
+        }
+        else
+        {
+            const bool modelPassed =
+                document->validationState == ModelValidationState::Passed;
+            DrawStatusMark(modelPassed);
+            ImGui::SameLine();
+            ImGui::TextUnformatted(modelPassed ? "Model: OK" : "Model: FAIL");
+
+            DrawStatusMark(document->clumpValid);
+            ImGui::SameLine();
+            ImGui::TextUnformatted(document->clumpValid ? "Clump: OK" : "Clump: FAIL");
+
+            DrawStatusMark(document->atomicsValid);
+            ImGui::SameLine();
+            ImGui::Text(
+                "%s (%zu)",
+                document->atomicsValid ? "Atomic: OK" : "Atomic: FAIL",
+                document->scannedAtomicCount);
+
+            DrawStatusMark(document->extensionsValid);
+            ImGui::SameLine();
+            ImGui::Text(
+                "%s (%zu plugins)",
+                document->extensionsValid ? "Extensions: OK" : "Extensions: FAIL",
+                document->scannedExtensionCount);
+
+            if (!document->validationError.empty())
+            {
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::TextDisabled("Failure: %s", document->validationError.c_str());
+                ImGui::PopTextWrapPos();
+            }
+        }
+        ImGui::PopID();
+
+        ImGui::Spacing();
         ImGui::Text("Meshes: %zu", document->model.geometries.size());
         ImGui::Text("Frames: %zu", document->model.frames.size());
         ImGui::Text("Objects: %zu", document->model.atomics.size());
@@ -580,6 +657,68 @@ void Application::DrawProperties()
             ImGui::PopID();
         }
 
+        ImGui::Checkbox(
+            "Dynamic Lighting",
+            &document->dynamicLighting);
+
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+        {
+            ImGui::SetTooltip(
+                "2D Effects affect geometry lighting for the selected model. Disabled by default.");
+        }
+
+        bool hasDayVertexColors = false;
+        bool hasNightVertexColors = false;
+        for (const Geometry& geometry : document->model.geometries)
+        {
+            hasDayVertexColors =
+                hasDayVertexColors ||
+                geometry.colors.size() == geometry.vertices.size();
+
+            hasNightVertexColors =
+                hasNightVertexColors ||
+                geometry.nightColors.size() == geometry.vertices.size();
+        }
+
+        ImGui::Spacing();
+        ImGui::TextUnformatted("Vertex Colors");
+
+        int vertexColorMode = document->showNightVertexColors ? 1 : 0;
+        ImGui::RadioButton("Day Vertex Colors", &vertexColorMode, 0);
+        ImGui::SameLine();
+
+        if (!hasNightVertexColors)
+        {
+            ImGui::BeginDisabled();
+        }
+
+        ImGui::RadioButton("Night Vertex Colors", &vertexColorMode, 1);
+
+        if (!hasNightVertexColors)
+        {
+            ImGui::EndDisabled();
+        }
+
+        document->showNightVertexColors =
+            hasNightVertexColors && vertexColorMode == 1;
+
+        if (!hasDayVertexColors && !hasNightVertexColors)
+        {
+            ImGui::TextDisabled("No vertex colors in this model.");
+        }
+        else if (!hasNightVertexColors)
+        {
+            ImGui::TextDisabled("Night vertex colors not present.");
+        }
+
+        ImGui::Spacing();
+        ImGui::Checkbox("Breakable", &document->breakableEnabled);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+        {
+            ImGui::SetTooltip(
+                "Embed/remove the GTA SA Breakable Model geometry extension (0x0253F2FD) on export.");
+        }
+
     }
 
     ImGui::Spacing();
@@ -601,7 +740,9 @@ void Application::DrawProperties()
         static_cast<int>(CollisionMode::MeshFaces));
     collisionMode = static_cast<CollisionMode>(mode);
 
-    if (document == nullptr)
+    const bool selectedModelUsable = document != nullptr && document->loaded;
+
+    if (!selectedModelUsable)
     {
         ImGui::BeginDisabled();
     }
@@ -612,7 +753,7 @@ void Application::DrawProperties()
     }
 
     const bool canDetachSelected =
-        document != nullptr &&
+        selectedModelUsable &&
         (document->model.hasNormalCollision ||
          document->model.hasSampCollision ||
          document->hasCollision ||
@@ -697,13 +838,32 @@ void Application::DrawProperties()
         ImGui::EndDisabled();
     }
 
-    if (document == nullptr)
+    if (ImGui::Button("Import COL Info", ImVec2(-1.0f, 0.0f)))
+    {
+        ImportColInfo();
+    }
+
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+    {
+        ImGui::SetTooltip(
+            "Match collision models from a .COL library and attach them as SA-MP collision.");
+    }
+
+    if (!selectedModelUsable)
     {
         ImGui::EndDisabled();
     }
 
     if (document != nullptr && document->hasCollision)
     {
+        if (document->importedCollisionFromLibrary)
+        {
+            ImGui::Text(
+                "COL source: %s (%s -> SA-MP COL3)",
+                document->importedCollisionName.c_str(),
+                document->importedCollisionFormat.c_str());
+        }
+
         ImGui::Text("Collision points: %zu", document->collision.vertices.size());
         ImGui::Text("Collision faces: %zu", document->collision.faces.size());
     }
@@ -1007,11 +1167,8 @@ void Application::DrawViewport()
 
     drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
 
-    Draw2DFXOverlay(
-        viewportMinimum.x,
-        viewportMinimum.y,
-        viewportMaximum.x,
-        viewportMaximum.y);
+    // 2DFX coronas are rendered in the OpenGL viewport pass. Keeping a
+    // second ImGui glow pass here doubled their brightness and ignored depth.
 
     DrawCollisionOverlay(
         viewportMinimum.x,
@@ -1019,6 +1176,128 @@ void Application::DrawViewport()
         viewportMaximum.x,
         viewportMaximum.y);
 
+    DrawViewGizmo(
+        viewportMinimum.x,
+        viewportMinimum.y,
+        viewportMaximum.x,
+        viewportMaximum.y);
+}
+
+void Application::DrawViewGizmo(
+    float left,
+    float top,
+    float right,
+    float bottom)
+{
+    if (right - left < 180.0f || bottom - top < 150.0f)
+    {
+        return;
+    }
+
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    const float panelWidth = 138.0f;
+    const float panelHeight = 118.0f;
+    const ImVec2 panelMin(right - panelWidth - 10.0f, top + 10.0f);
+    const ImVec2 panelMax(right - 10.0f, top + 10.0f + panelHeight);
+
+    // Keep the gizmo over the rendered viewport without an opaque ImGui
+    // panel/button background. Hover/active feedback remains translucent.
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.20f, 0.26f, 0.55f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.26f, 0.29f, 0.38f, 0.72f));
+
+    ImGui::SetCursorScreenPos(ImVec2(panelMin.x + 7.0f, panelMin.y + 7.0f));
+    if (ImGui::SmallButton(gizmoMode == 0 ? "Rotate*" : "Rotate"))
+    {
+        gizmoMode = 0;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton(gizmoMode == 1 ? "Slide*" : "Slide"))
+    {
+        gizmoMode = 1;
+    }
+    ImGui::PopStyleColor(3);
+
+    const ImVec2 center(panelMin.x + panelWidth * 0.5f, panelMin.y + 78.0f);
+    const float axisLength = 36.0f;
+    const Vec3 viewRight = camera.Right();
+    const Vec3 viewUp = camera.Up();
+
+    struct AxisHandle
+    {
+        const char* id;
+        const char* label;
+        Vec3 axis;
+        ImU32 color;
+    };
+
+    const AxisHandle axes[3] = {
+        {"##gizmo-x", "X", {1.0f, 0.0f, 0.0f}, IM_COL32(235, 75, 75, 255)},
+        {"##gizmo-y", "Y", {0.0f, 1.0f, 0.0f}, IM_COL32(85, 220, 105, 255)},
+        {"##gizmo-z", "Z", {0.0f, 0.0f, 1.0f}, IM_COL32(90, 145, 245, 255)}
+    };
+
+    for (int index = 0; index < 3; ++index)
+    {
+        const AxisHandle& handle = axes[index];
+        float screenX = Dot(handle.axis, viewRight);
+        float screenY = -Dot(handle.axis, viewUp);
+        const float length = std::sqrt(screenX * screenX + screenY * screenY);
+        if (length < 0.08f)
+        {
+            screenX = index == 0 ? 1.0f : 0.3f;
+            screenY = index == 2 ? -1.0f : 0.3f;
+        }
+        else
+        {
+            screenX /= length;
+            screenY /= length;
+        }
+
+        const ImVec2 endPoint(
+            center.x + screenX * axisLength,
+            center.y + screenY * axisLength);
+
+        drawList->AddLine(center, endPoint, handle.color, 2.2f);
+        drawList->AddCircleFilled(endPoint, 7.0f, handle.color, 16);
+        drawList->AddText(
+            ImVec2(endPoint.x - 3.5f, endPoint.y - 7.0f),
+            IM_COL32(245, 245, 245, 255),
+            handle.label);
+
+        ImGui::SetCursorScreenPos(ImVec2(endPoint.x - 10.0f, endPoint.y - 10.0f));
+        ImGui::InvisibleButton(handle.id, ImVec2(20.0f, 20.0f));
+
+        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+        {
+            const ImVec2 delta = ImGui::GetIO().MouseDelta;
+            const float signedDrag = delta.x * screenX + delta.y * screenY;
+
+            if (gizmoMode == 0)
+            {
+                if (index == 0)
+                {
+                    camera.pitch += signedDrag * 0.55f;
+                }
+                else if (index == 1)
+                {
+                    camera.roll += signedDrag * 0.55f;
+                }
+                else
+                {
+                    camera.yaw += signedDrag * 0.55f;
+                }
+            }
+            else
+            {
+                const float slideScale =
+                    std::max(camera.distance * 0.0025f, 0.0005f);
+                camera.target += handle.axis * (signedDrag * slideScale);
+            }
+        }
+    }
+
+    drawList->AddCircleFilled(center, 4.0f, IM_COL32(215, 218, 224, 255), 12);
 }
 
 void Application::Draw2DFXOverlay(
@@ -1485,65 +1764,56 @@ void Application::LoadDffPaths(
     {
         documents.clear();
         selectedIndex = 0;
+        txd = {};
+        renderer.InvalidateTextures();
     }
 
-    std::size_t loadedCount = 0;
-    std::ostringstream failures;
-
+    const std::size_t firstAddedIndex = documents.size();
     for (const std::filesystem::path& path : paths)
     {
-        ModelData model{};
-        std::string error;
-
-        if (!dffReader.LoadDff(path, model, error))
-        {
-            failures << path.filename().string() << ": " << error << "  ";
-            continue;
-        }
-
-        std::vector<std::uint8_t> sourceBytes;
-
-        if (!ReadSourceBytes(path, sourceBytes, error))
-        {
-            failures << path.filename().string()
-                     << ": " << error << "  ";
-            continue;
-        }
-
         auto document = std::make_unique<ModelDocument>();
         document->sourcePath = path;
         document->displayName = path.filename().string();
-        document->sourceBytes = std::move(sourceBytes);
-        document->model = std::move(model);
-
         documents.push_back(std::move(document));
-        ++loadedCount;
+    }
+
+    std::size_t passedCount = 0;
+    std::size_t failedCount = 0;
+
+    for (std::size_t index = firstAddedIndex; index < documents.size(); ++index)
+    {
+        if (EnsureDocumentLoaded(index))
+        {
+            ++passedCount;
+        }
+        else
+        {
+            ++failedCount;
+        }
     }
 
     if (!documents.empty())
     {
-        selectedIndex = std::min(selectedIndex, documents.size() - 1);
-        camera.Frame(documents[selectedIndex]->model.bounds);
+        selectedIndex = std::min(firstAddedIndex, documents.size() - 1);
+        if (documents[selectedIndex]->loaded)
+        {
+            camera.Frame(documents[selectedIndex]->model.bounds);
+            FindAndLoadMatchingTxd({documents[selectedIndex]->sourcePath});
+        }
     }
 
     std::ostringstream status;
-    status << "Opened " << loadedCount << " DFF file";
-    if (loadedCount != 1)
+    status << "Scanned " << (passedCount + failedCount) << " DFF file";
+    if (passedCount + failedCount != 1)
     {
         status << "s";
     }
-
-    if (!failures.str().empty())
+    status << ": " << passedCount << " OK";
+    if (failedCount != 0)
     {
-        status << ". Failed: " << failures.str();
+        status << ", " << failedCount << " failed";
     }
-
     SetStatus(status.str());
-
-    if (loadedCount != 0)
-    {
-        FindAndLoadMatchingTxd(paths);
-    }
 }
 
 void Application::LoadDffFolder(const std::filesystem::path& folder)
@@ -1554,16 +1824,18 @@ void Application::LoadDffFolder(const std::filesystem::path& folder)
     }
 
     std::vector<std::filesystem::path> paths;
+    std::error_code error;
 
-    for (const std::filesystem::directory_entry& entry :
-         std::filesystem::directory_iterator(folder))
+    for (std::filesystem::directory_iterator iterator(folder, error);
+         !error && iterator != std::filesystem::directory_iterator();
+         iterator.increment(error))
     {
-        if (!entry.is_regular_file())
+        if (!iterator->is_regular_file(error))
         {
             continue;
         }
 
-        std::string extension = entry.path().extension().string();
+        std::string extension = iterator->path().extension().string();
         std::transform(
             extension.begin(),
             extension.end(),
@@ -1575,12 +1847,178 @@ void Application::LoadDffFolder(const std::filesystem::path& folder)
 
         if (extension == ".dff")
         {
-            paths.push_back(entry.path());
+            paths.push_back(iterator->path());
         }
     }
 
+    if (error)
+    {
+        SetStatus("Could not enumerate DFF folder: " + error.message());
+        return;
+    }
+
     std::sort(paths.begin(), paths.end());
-    LoadDffPaths(paths, true);
+
+    documents.clear();
+    documents.reserve(paths.size());
+    selectedIndex = 0;
+    txd = {};
+    renderer.InvalidateTextures();
+
+    for (const std::filesystem::path& path : paths)
+    {
+        auto document = std::make_unique<ModelDocument>();
+        document->sourcePath = path;
+        document->displayName = path.filename().string();
+        documents.push_back(std::move(document));
+    }
+
+    if (documents.empty())
+    {
+        SetStatus("No DFF files found in " + folder.string());
+        return;
+    }
+
+    if (!EnsureDocumentLoaded(0))
+    {
+        return;
+    }
+
+    camera.Frame(documents[0]->model.bounds);
+    FindAndLoadMatchingTxd({documents[0]->sourcePath});
+
+    std::ostringstream status;
+    status << "Opened folder with " << documents.size()
+           << " DFF files. Models are loaded on demand.";
+    SetStatus(status.str());
+}
+
+bool Application::EnsureDocumentLoaded(std::size_t index)
+{
+    if (index >= documents.size())
+    {
+        return false;
+    }
+
+    ModelDocument& document = *documents[index];
+    if (document.loaded)
+    {
+        return true;
+    }
+
+    if (document.loadAttempted &&
+        document.validationState == ModelValidationState::Failed)
+    {
+        SetStatus(
+            "Model failed validation: " + document.displayName +
+            ": " + document.validationError);
+        return false;
+    }
+
+    document.loadAttempted = true;
+
+    DffValidationResult validation{};
+    if (!dffReader.ValidateDff(document.sourcePath, validation))
+    {
+        document.validationState = ModelValidationState::Failed;
+        document.clumpValid = validation.clumpValid;
+        document.atomicsValid = validation.atomicsValid;
+        document.extensionsValid = validation.extensionsValid;
+        document.scannedAtomicCount = validation.atomicCount;
+        document.scannedExtensionCount = validation.extensionCount;
+        document.validationError = validation.error.empty()
+            ? "Unknown RenderWare validation failure."
+            : validation.error;
+
+        SetStatus(
+            "Model failed validation: " + document.displayName +
+            ": " + document.validationError);
+        return false;
+    }
+
+    document.validationState = ModelValidationState::Passed;
+    document.clumpValid = validation.clumpValid;
+    document.atomicsValid = validation.atomicsValid;
+    document.extensionsValid = validation.extensionsValid;
+    document.scannedAtomicCount = validation.atomicCount;
+    document.scannedExtensionCount = validation.extensionCount;
+    document.validationError.clear();
+
+    ModelData model{};
+    std::string error;
+    if (!dffReader.LoadDff(document.sourcePath, model, error))
+    {
+        document.validationState = ModelValidationState::Failed;
+        document.validationError = error.empty()
+            ? "RenderWare parser rejected the DFF after structural validation."
+            : error;
+        SetStatus(
+            "Could not open " + document.displayName + ": " +
+            document.validationError);
+        return false;
+    }
+
+    std::vector<std::uint8_t> sourceBytes;
+    if (!ReadSourceBytes(document.sourcePath, sourceBytes, error))
+    {
+        document.validationState = ModelValidationState::Failed;
+        document.validationError = error;
+        SetStatus(
+            "Could not open " + document.displayName + ": " + error);
+        return false;
+    }
+
+    document.model = std::move(model);
+    document.sourceBytes = std::move(sourceBytes);
+
+    if (!document.breakableStateInitialized)
+    {
+        document.breakableEnabled = std::any_of(
+            document.model.geometries.begin(),
+            document.model.geometries.end(),
+            [](const Geometry& geometry)
+            {
+                return geometry.hasBreakableModel;
+            });
+        document.breakableStateInitialized = true;
+    }
+    document.loaded = true;
+    return true;
+}
+
+void Application::UnloadDocumentIfPristine(std::size_t index)
+{
+    if (index >= documents.size() || index == selectedIndex)
+    {
+        return;
+    }
+
+    ModelDocument& document = *documents[index];
+    const bool sourceBreakable = std::any_of(
+        document.model.geometries.begin(),
+        document.model.geometries.end(),
+        [](const Geometry& geometry)
+        {
+            return geometry.hasBreakableModel;
+        });
+
+    const bool modified =
+        document.hasCollision ||
+        document.collisionDetached ||
+        document.collisionExportMode != CollisionExportMode::PreserveSource ||
+        (document.breakableStateInitialized &&
+         document.breakableEnabled != sourceBreakable);
+
+    if (!document.loaded || modified)
+    {
+        return;
+    }
+
+    document.sourceBytes.clear();
+    document.sourceBytes.shrink_to_fit();
+    document.model = {};
+    document.collision = {};
+    document.loaded = false;
 }
 
 void Application::LoadTxd(const std::filesystem::path& path)
@@ -1782,6 +2220,10 @@ void Application::AttachCollisionToSelected()
         document->model,
         collisionMode);
 
+    document->importedCollisionBytes.clear();
+    document->importedCollisionName.clear();
+    document->importedCollisionFormat.clear();
+    document->importedCollisionFromLibrary = false;
     document->hasCollision = true;
     document->collisionDetached = false;
     document->collisionExportMode = CollisionExportMode::AttachOrReplace;
@@ -1794,12 +2236,22 @@ void Application::AttachCollisionToSelected()
 
 void Application::AttachCollisionToAll()
 {
-    for (std::unique_ptr<ModelDocument>& document : documents)
+    for (std::size_t index = 0; index < documents.size(); ++index)
     {
+        if (!EnsureDocumentLoaded(index))
+        {
+            continue;
+        }
+
+        std::unique_ptr<ModelDocument>& document = documents[index];
         document->collision = collisionBuilder.Build(
             document->model,
             collisionMode);
 
+        document->importedCollisionBytes.clear();
+        document->importedCollisionName.clear();
+        document->importedCollisionFormat.clear();
+        document->importedCollisionFromLibrary = false;
         document->hasCollision = true;
         document->collisionDetached = false;
         document->collisionExportMode =
@@ -1854,8 +2306,14 @@ void Application::DetachCollisionFromAll()
     std::size_t failureCount = 0;
     std::ostringstream failures;
 
-    for (std::unique_ptr<ModelDocument>& document : documents)
+    for (std::size_t index = 0; index < documents.size(); ++index)
     {
+        if (!EnsureDocumentLoaded(index))
+        {
+            continue;
+        }
+
+        std::unique_ptr<ModelDocument>& document = documents[index];
         bool detached = false;
         std::string error;
 
@@ -1888,6 +2346,129 @@ void Application::DetachCollisionFromAll()
     SetStatus(status.str());
 }
 
+
+void Application::ImportColInfo()
+{
+    if (documents.empty())
+    {
+        SetStatus("Open a DFF or DFF folder before importing COL info.");
+        return;
+    }
+
+    const std::filesystem::path colPath = FileDialog::OpenColFile();
+    if (colPath.empty())
+    {
+        return;
+    }
+
+    std::unordered_map<std::string, ColLibraryEntry> entries;
+    std::string error;
+
+    if (!colLibraryReader.Load(colPath, entries, error))
+    {
+        SetStatus("COL import failed: " + error);
+        return;
+    }
+
+    std::size_t matchedCount = 0;
+    std::size_t previewCount = 0;
+    std::size_t loadFailureCount = 0;
+    std::vector<std::string> missingNames;
+
+    for (std::size_t index = 0; index < documents.size(); ++index)
+    {
+        if (!EnsureDocumentLoaded(index))
+        {
+            ++loadFailureCount;
+            continue;
+        }
+
+        ModelDocument& document = *documents[index];
+        const std::string key = ColLibraryReader::NormalizeModelName(
+            document.sourcePath.stem().string());
+
+        const auto found = entries.find(key);
+        if (found == entries.end())
+        {
+            missingNames.push_back(document.sourcePath.stem().string());
+            continue;
+        }
+
+        const ColLibraryEntry& entry = found->second;
+
+        // Import COL information into ODFF's neutral collision structure,
+        // then mark it for SA-MP-style DFF embedding. We intentionally do not
+        // attach the raw .COL entry bytes: DffExporter rebuilds this data as
+        // SA-MP COL3 when the DFF is exported.
+        if (!entry.previewAvailable)
+        {
+            missingNames.push_back(
+                document.sourcePath.stem().string() +
+                " (unsupported " + entry.format + ")");
+            continue;
+        }
+
+        document.importedCollisionBytes.clear();
+        document.importedCollisionName = entry.name;
+        document.importedCollisionFormat = entry.format;
+        document.importedCollisionFromLibrary = true;
+        document.collisionDetached = false;
+        document.collisionExportMode = CollisionExportMode::AttachOrReplace;
+        document.collision = entry.collision;
+        document.hasCollision = true;
+
+        ++previewCount;
+        ++matchedCount;
+    }
+
+    std::ostringstream status;
+    status << "Imported COL info for " << matchedCount
+           << " of " << documents.size() << " DFF";
+
+    if (documents.size() != 1)
+    {
+        status << "s";
+    }
+
+    status << " from " << colPath.filename().string() << ".";
+
+    if (matchedCount != 0)
+    {
+        status << " Attached " << previewCount
+               << " match" << (previewCount == 1 ? "" : "es")
+               << " as SA-MP COL3 collision.";
+    }
+
+    if (!missingNames.empty())
+    {
+        status << " Unmatched or unsupported: ";
+        const std::size_t shown = std::min<std::size_t>(missingNames.size(), 5);
+
+        for (std::size_t missingIndex = 0; missingIndex < shown; ++missingIndex)
+        {
+            if (missingIndex != 0)
+            {
+                status << ", ";
+            }
+
+            status << missingNames[missingIndex];
+        }
+
+        if (missingNames.size() > shown)
+        {
+            status << " and " << (missingNames.size() - shown) << " more";
+        }
+
+        status << ".";
+    }
+
+    if (loadFailureCount != 0)
+    {
+        status << " " << loadFailureCount << " DFF(s) could not be loaded.";
+    }
+
+    SetStatus(status.str());
+}
 
 void Application::ExportSelectedDff()
 {
@@ -1958,8 +2539,14 @@ void Application::ExportDffGroup()
     std::size_t skippedDuplicates = 0;
     std::ostringstream failures;
 
-    for (const std::unique_ptr<ModelDocument>& document : documents)
+    for (std::size_t index = 0; index < documents.size(); ++index)
     {
+        if (!EnsureDocumentLoaded(index))
+        {
+            continue;
+        }
+
+        const std::unique_ptr<ModelDocument>& document = documents[index];
         std::string key = document->sourcePath.filename().string();
 
         std::transform(

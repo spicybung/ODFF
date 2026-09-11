@@ -2,6 +2,7 @@
 
 #include "Camera.h"
 #include "CollisionBuilder.h"
+#include "ColLibraryReader.h"
 #include "DffExporter.h"
 #include "ModelDocument.h"
 #include "OpenGLRenderer.h"
@@ -29,6 +30,7 @@ private:
     void DrawProperties();
     void DrawStatusBar();
     void DrawViewport();
+    void DrawViewGizmo(float left, float top, float right, float bottom);
     void DrawCollisionOverlay(
         float left,
         float top,
@@ -48,6 +50,9 @@ private:
     void LoadDffFolder(
         const std::filesystem::path& folder);
 
+    bool EnsureDocumentLoaded(std::size_t index);
+    void UnloadDocumentIfPristine(std::size_t index);
+
     void LoadTxd(
         const std::filesystem::path& path);
 
@@ -60,6 +65,7 @@ private:
     void DetachCollisionFromAll();
     void ExportSelectedDff();
     void ExportDffGroup();
+    void ImportColInfo();
 
     bool ReadSourceBytes(
         const std::filesystem::path& path,
@@ -86,6 +92,7 @@ private:
     TxdReader txdReader;
     OpenGLRenderer renderer;
     CollisionBuilder collisionBuilder;
+    ColLibraryReader colLibraryReader;
     DffExporter dffExporter;
     Camera camera;
 
@@ -98,6 +105,7 @@ private:
     bool showCollision = true;
     bool showEffects2D = true;
     bool showGrid = true;
+    int gizmoMode = 0;
 
     bool viewportHovered = false;
     int viewportPixelX = 0;

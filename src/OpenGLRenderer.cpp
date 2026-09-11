@@ -269,11 +269,20 @@ void OpenGLRenderer::Render(
 
     if (document != nullptr)
     {
-        DrawModel(document->model, wireframe, textureDictionary);
+        DrawModel(
+            document->model,
+            wireframe,
+            textureDictionary,
+            document->showNightVertexColors);
 
         if (showEffects2D)
         {
-            DrawEffects2D(document->model, textureDictionary);
+            DrawEffects2D(
+                document->model,
+                textureDictionary,
+                document->dynamicLighting,
+                document->showNightVertexColors,
+                camera.Position());
         }
 
     }
@@ -287,7 +296,10 @@ void OpenGLRenderer::Render(
 
 void OpenGLRenderer::DrawEffects2D(
     const ModelData& model,
-    const TxdData* textureDictionary) const
+    const TxdData* textureDictionary,
+    bool dynamicLighting,
+    bool nightPreview,
+    const Vec3& cameraPosition) const
 {
     std::vector<WorldLight> lights;
     lights.reserve(model.omniLightCount);
@@ -328,8 +340,16 @@ void OpenGLRenderer::DrawEffects2D(
         return;
     }
 
-    DrawPointLightPass(model, lights);
-    DrawLightGlows(lights, textureDictionary);
+    if (dynamicLighting)
+    {
+        DrawPointLightPass(model, lights);
+    }
+
+    DrawLightGlows(
+        lights,
+        textureDictionary,
+        nightPreview,
+        cameraPosition);
 }
 
 void OpenGLRenderer::CollectGeometryLights(
@@ -454,7 +474,9 @@ void OpenGLRenderer::DrawGeometryPointLightPass(
 
 void OpenGLRenderer::DrawLightGlows(
     const std::vector<WorldLight>& lights,
-    const TxdData* textureDictionary) const
+    const TxdData* textureDictionary,
+    bool nightPreview,
+    const Vec3& cameraPosition) const
 {
     float modelView[16]{};
     glGetFloatv(GL_MODELVIEW_MATRIX, modelView);
@@ -470,7 +492,85 @@ void OpenGLRenderer::DrawLightGlows(
 
     for (const WorldLight& light : lights)
     {
-        if (light.effect.coronaSize <= 0.0f || (light.effect.flags1 & 8) != 0)
+        constexpr std::uint8_t CoronaCheckObstacles = 1u;
+        constexpr std::uint8_t WithoutCorona = 8u;
+        constexpr std::uint8_t CoronaOnlyAtLongDistance = 16u;
+        constexpr std::uint8_t AtDay = 32u;
+        constexpr std::uint8_t AtNight = 64u;
+        constexpr std::uint8_t CoronaOnlyFromBelow = 1u;
+        constexpr std::uint8_t CheckDirection = 8u;
+
+        if (light.effect.coronaSize <= 0.0f ||
+            (light.effect.flags1 & WithoutCorona) != 0)
+        {
+            continue;
+        }
+
+        const bool dayOnly =
+            (light.effect.flags1 & AtDay) != 0 &&
+            (light.effect.flags1 & AtNight) == 0;
+        const bool nightOnly =
+            (light.effect.flags1 & AtNight) != 0 &&
+            (light.effect.flags1 & AtDay) == 0;
+        if ((nightPreview && dayOnly) || (!nightPreview && nightOnly))
+        {
+            continue;
+        }
+
+        const Vec3 cameraOffset = cameraPosition - light.position;
+        const float cameraDistance = Length(cameraOffset);
+        const float farClip = light.effect.coronaFarClip;
+        if (farClip > 0.0f && cameraDistance >= farClip)
+        {
+            continue;
+        }
+
+        if ((light.effect.flags2 & CoronaOnlyFromBelow) != 0 &&
+            cameraPosition.z >= light.position.z)
+        {
+            continue;
+        }
+
+        if ((light.effect.flags2 & CheckDirection) != 0 &&
+            light.effect.hasLookDirection)
+        {
+            const Vec3 direction = Normalize(light.effect.lookDirection);
+            const Vec3 towardCamera = Normalize(cameraOffset);
+            if (Dot(direction, towardCamera) <= 0.0f)
+            {
+                continue;
+            }
+        }
+
+        float distanceFade = 1.0f;
+        if (farClip > 0.0f)
+        {
+            const float fadeStart = farClip * 0.80f;
+            if (cameraDistance > fadeStart)
+            {
+                distanceFade = std::clamp(
+                    (farClip - cameraDistance) /
+                    std::max(farClip - fadeStart, 0.001f),
+                    0.0f,
+                    1.0f);
+            }
+        }
+
+        if ((light.effect.flags1 & CoronaOnlyAtLongDistance) != 0)
+        {
+            const float longDistanceStart =
+                farClip > 0.0f ? farClip * 0.35f : 25.0f;
+            const float longDistanceEnd =
+                farClip > 0.0f ? farClip * 0.55f : 60.0f;
+            const float longDistanceFade = std::clamp(
+                (cameraDistance - longDistanceStart) /
+                std::max(longDistanceEnd - longDistanceStart, 0.001f),
+                0.0f,
+                1.0f);
+            distanceFade *= longDistanceFade;
+        }
+
+        if (distanceFade <= 0.001f)
         {
             continue;
         }
@@ -496,10 +596,15 @@ void OpenGLRenderer::DrawLightGlows(
         const float red = static_cast<float>(light.effect.color.r) / 255.0f;
         const float green = static_cast<float>(light.effect.color.g) / 255.0f;
         const float blue = static_cast<float>(light.effect.color.b) / 255.0f;
-        const float sourceAlpha = static_cast<float>(light.effect.color.a) / 255.0f;
-        const float glowAlpha = std::clamp(sourceAlpha * 0.35f, 0.08f, 0.35f);
+        const float sourceAlpha =
+            (static_cast<float>(light.effect.color.a) / 255.0f) *
+            distanceFade;
+        const float glowAlpha = std::clamp(
+            sourceAlpha * 0.45f,
+            0.0f,
+            0.55f);
 
-        if ((light.effect.flags1 & 1) != 0)
+        if ((light.effect.flags1 & CoronaCheckObstacles) != 0)
         {
             glEnable(GL_DEPTH_TEST);
         }
@@ -529,22 +634,30 @@ void OpenGLRenderer::DrawLightGlows(
         else
         {
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-            glBegin(GL_TRIANGLE_FAN);
-            glColor4f(red, green, blue, glowAlpha);
-            glVertex3f(light.position.x, light.position.y, light.position.z);
-            glColor4f(red, green, blue, 0.0f);
 
-            for (int segment = 0; segment <= SegmentCount; ++segment)
+            // Two radial layers approximate GTA's soft corona when the TXD
+            // containing the named corona texture is not loaded.
+            const float layerSizes[2] = {size, size * 0.42f};
+            const float layerAlphas[2] = {glowAlpha * 0.55f, sourceAlpha * 0.80f};
+            for (int layer = 0; layer < 2; ++layer)
             {
-                const float angle = TwoPi * static_cast<float>(segment) /
-                    static_cast<float>(SegmentCount);
-                const Vec3 offset =
-                    right * (std::cos(angle) * size) +
-                    up * (std::sin(angle) * size);
-                const Vec3 vertex = light.position + offset;
-                glVertex3f(vertex.x, vertex.y, vertex.z);
+                glBegin(GL_TRIANGLE_FAN);
+                glColor4f(red, green, blue, layerAlphas[layer]);
+                glVertex3f(light.position.x, light.position.y, light.position.z);
+                glColor4f(red, green, blue, 0.0f);
+
+                for (int segment = 0; segment <= SegmentCount; ++segment)
+                {
+                    const float angle = TwoPi * static_cast<float>(segment) /
+                        static_cast<float>(SegmentCount);
+                    const Vec3 offset =
+                        right * (std::cos(angle) * layerSizes[layer]) +
+                        up * (std::sin(angle) * layerSizes[layer]);
+                    const Vec3 vertex = light.position + offset;
+                    glVertex3f(vertex.x, vertex.y, vertex.z);
+                }
+                glEnd();
             }
-            glEnd();
         }
     }
 
@@ -557,7 +670,8 @@ void OpenGLRenderer::DrawLightGlows(
 void OpenGLRenderer::DrawModel(
     const ModelData& model,
     bool wireframe,
-    const TxdData* textureDictionary) const
+    const TxdData* textureDictionary,
+    bool showNightVertexColors) const
 {
     glPolygonMode(
         GL_FRONT_AND_BACK,
@@ -594,7 +708,8 @@ void OpenGLRenderer::DrawModel(
                     static_cast<std::size_t>(
                         atomic.geometryIndex)],
                 transform,
-                textureDictionary);
+                textureDictionary,
+                showNightVertexColors);
         }
 
         return;
@@ -604,14 +719,19 @@ void OpenGLRenderer::DrawModel(
 
     for (const Geometry& geometry : model.geometries)
     {
-        DrawGeometry(geometry, identity, textureDictionary);
+        DrawGeometry(
+            geometry,
+            identity,
+            textureDictionary,
+            showNightVertexColors);
     }
 }
 
 void OpenGLRenderer::DrawGeometry(
     const Geometry& geometry,
     const Mat4& transform,
-    const TxdData* textureDictionary) const
+    const TxdData* textureDictionary,
+    bool showNightVertexColors) const
 {
     glPushMatrix();
     glMultMatrixf(transform.m);
@@ -622,7 +742,8 @@ void OpenGLRenderer::DrawGeometry(
             geometry,
             nullptr,
             std::numeric_limits<std::uint16_t>::max(),
-            nullptr);
+            nullptr,
+            showNightVertexColors);
     }
     else
     {
@@ -644,14 +765,16 @@ void OpenGLRenderer::DrawGeometry(
                 geometry,
                 &material,
                 static_cast<std::uint16_t>(materialIndex),
-                uploadedTexture);
+                uploadedTexture,
+                showNightVertexColors);
         }
 
         DrawMaterialTriangles(
             geometry,
             nullptr,
             std::numeric_limits<std::uint16_t>::max(),
-            nullptr);
+            nullptr,
+            showNightVertexColors);
     }
 
     glDisable(GL_TEXTURE_2D);
@@ -776,7 +899,8 @@ void OpenGLRenderer::DrawMaterialTriangles(
     const Geometry& geometry,
     const MaterialInfo* material,
     std::uint16_t materialIndex,
-    const UploadedTexture* texture) const
+    const UploadedTexture* texture,
+    bool showNightVertexColors) const
 {
     const bool hasTexture = texture != nullptr && texture->id != 0;
 
@@ -792,6 +916,12 @@ void OpenGLRenderer::DrawMaterialTriangles(
 
         return triangle.materialIndex == materialIndex;
     };
+
+    const std::vector<Color4>& vertexColors =
+        showNightVertexColors &&
+        geometry.nightColors.size() == geometry.vertices.size()
+            ? geometry.nightColors
+            : geometry.colors;
 
     bool hasVertexAlpha = false;
     for (const Triangle& triangle : geometry.triangles)
@@ -809,8 +939,8 @@ void OpenGLRenderer::DrawMaterialTriangles(
 
         for (const std::uint32_t index : indices)
         {
-            if (index < geometry.colors.size() &&
-                geometry.colors[index].a < 255)
+            if (index < vertexColors.size() &&
+                vertexColors[index].a < 255)
             {
                 hasVertexAlpha = true;
                 break;
@@ -893,9 +1023,9 @@ void OpenGLRenderer::DrawMaterialTriangles(
         {
             Color4 color{255, 255, 255, 255};
 
-            if (index < geometry.colors.size())
+            if (index < vertexColors.size())
             {
-                color = geometry.colors[index];
+                color = vertexColors[index];
             }
 
             if (material != nullptr)

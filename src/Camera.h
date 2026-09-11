@@ -18,6 +18,7 @@ public:
 
     float yaw = 35.0f;
     float pitch = 20.0f;
+    float roll = 0.0f;
     float distance = 10.0f;
     Vec3 target{};
 

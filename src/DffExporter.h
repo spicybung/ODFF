@@ -52,6 +52,16 @@ private:
         const ModelData& model,
         std::string& error) const;
 
+    bool ApplyBreakableModelState(
+        std::vector<std::uint8_t>& dffBytes,
+        const ModelData& model,
+        bool enabled,
+        std::string& error) const;
+
+    std::vector<std::uint8_t> BuildBreakablePlugin(
+        const Geometry& geometry,
+        std::uint32_t version) const;
+
     std::vector<std::uint8_t> BuildSampCol3(
         const CollisionData& collision) const;
 

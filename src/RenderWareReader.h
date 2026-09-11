@@ -8,10 +8,22 @@
 #include <string>
 #include <vector>
 
+struct DffValidationResult
+{
+    bool valid = false;
+    bool clumpValid = false;
+    bool atomicsValid = false;
+    bool extensionsValid = false;
+    std::size_t atomicCount = 0;
+    std::size_t extensionCount = 0;
+    std::string error;
+};
+
 class RenderWareReader
 {
 public:
     bool LoadDff(const std::filesystem::path& path, ModelData& model, std::string& error);
+    bool ValidateDff(const std::filesystem::path& path, DffValidationResult& result);
 
 private:
     struct ChunkHeader
@@ -60,6 +72,7 @@ private:
     void ParseClumpExtension(BinaryReader& reader, const ChunkHeader& extension, ModelData& model);
     void ParseGeometryExtension(BinaryReader& reader, const ChunkHeader& extension, Geometry& geometry);
     void Parse2DFX(BinaryReader& reader, const ChunkHeader& plugin, Geometry& geometry);
+    void ParseExtraVertexColors(BinaryReader& reader, const ChunkHeader& plugin, Geometry& geometry);
     void BuildWorldTransforms(ModelData& model);
     void BuildBounds(ModelData& model);
 };
