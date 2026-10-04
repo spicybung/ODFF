@@ -1,4 +1,4 @@
-# ODFF for SAMP/OMP
+# ODFF for SAMP/OMP - the new KDFF
 
 [![License](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
