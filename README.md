@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
-**ODFF(Open DFF)** is an open source model conversion program for *San Andreas Multiplayer* & *open.multiplayer*. It's intended function is to attach the proper SAMP collision to an object or object group of your choice, allowing the object(s) to display and be used correctly in SA-MP/open.mp. The basic functionality is similar to Kalcors KDFF program for SAMP 0.3DL, but with more features. A few more relevant tools are thrown in for convenience.
+**ODFF(Open DFF)** is an open source model conversion program for *San Andreas Multiplayer* & *open.multiplayer*. It's main intended function, yet not the only one, is to attach the proper SAMP collision to an object or object group of your choice, allowing the object(s) to display and be used correctly in SA-MP/open.mp. The basic functionality is similar to Kalcors KDFF program for SAMP 0.3DL, but with more features. A few more relevant tools are thrown in for convenience.
 
 <img width="1917" height="1140" alt="image" src="https://github.com/user-attachments/assets/1b71c6e6-c4e5-4107-87f6-4ce39fe6e714" />
 
